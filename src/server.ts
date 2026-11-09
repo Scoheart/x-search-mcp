@@ -110,6 +110,6 @@ if (typeof (server as any).registerTool === 'function') {
  * stdout is strictly reserved for JSON-RPC MCP messages.
  * Diagnostic logs are written to stderr.
  */
-export async function startStdio(): Promise<void> {
-  await serveStdio(server);
+export function startStdio() {
+  return serveStdio(() => server);
 }

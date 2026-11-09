@@ -128,7 +128,6 @@ export async function sendHttpRequest({
         body: body as any,
         dispatcher: proxyAgent,
         signal: timeoutController.signal,
-        maxRedirections: 0,
       });
     } catch (err: any) {
       if (signal?.aborted || err?.message === 'CANCELLED') {

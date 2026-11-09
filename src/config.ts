@@ -8,7 +8,6 @@ if (process.env.X_SEARCH_ENV_FILE) {
   const envFilePath = path.resolve(process.env.X_SEARCH_ENV_FILE);
   if (fs.existsSync(envFilePath)) {
     try {
-      // @ts-expect-error Node.js >=21.7 / 22+ built-in
       process.loadEnvFile(envFilePath);
     } catch (err: any) {
       throw new Error(`Failed to load environment file from ${envFilePath}: ${err.message}`);
