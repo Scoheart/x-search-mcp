@@ -1,0 +1,8 @@
+[mcp.servers.x-search]
+command = "node"
+args = ["/Users/scoheart/Code/scoheart/x-search-mcp/bin/x-search-mcp.js"]
+timeout = 600
+
+[mcp.servers.x-search.env]
+X_SEARCH_AUTH_MODE = "auto"
+X_SEARCH_MODEL = "grok-4.5"

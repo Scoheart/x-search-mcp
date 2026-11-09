@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "x-search": {
+      "command": "node",
+      "args": [
+        "/Users/scoheart/Code/scoheart/x-search-mcp/bin/x-search-mcp.js"
+      ],
+      "env": {
+        "X_SEARCH_AUTH_MODE": "auto",
+        "X_SEARCH_MODEL": "grok-4.5"
+      },
+      "timeout": 600
+    }
+  }
+}

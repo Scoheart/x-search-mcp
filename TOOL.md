@@ -1,0 +1,205 @@
+# @scoheart/x-search-mcp 工具接入与使用说明
+
+本工具是一个独立运行的 Node.js/TypeScript MCP 服务，提供只读工具 `x_search`，支持通过 xAI Responses API 对 X（原 Twitter）实时动态与历史发帖进行检索。本服务实现参考 Nous Research 的 Hermes Agent（commit `fcca1740533d59d7a46ab1a3a53d3a45ef3127ff`），但作为独立 MCP 包提供，无需安装或运行 Hermes。
+
+---
+
+## 核心特性
+
+- **标准 MCP 协议**：基于 `@modelcontextprotocol/server`，默认运行在 `stdio` 模式，输出标准 JSON-RPC。
+- **只读与安全性**：仅提供 `x_search` 检索工具，无发帖、点赞、关注或私信写操作；错误信息经由本地脱敏，不回显 upstream token/key。
+- **双认证模式**：支持按量付费 API Key 与 Grok 订阅 OAuth（设备码登录）；支持多进程并发共享令牌并带文件锁（`proper-lockfile`）。
+- **来源与降级感知**：提取结构化 citations 与正文 inline_citations。若上游无有效引用来源，自动标记 `degraded: true`。
+
+---
+
+## 约束与边界说明（重要）
+
+1. **非官方项目**：本项目为独立开源 MCP 实现，并非 xAI 或 Nous Research / Hermes 官方 MCP。
+2. **仅本地 stdio 传输**：当前版本未开放远程 HTTP/SSE/WebSocket 监听入口，所有接入 Agent 通过启动子进程连接各自的 `stdio`。
+3. **公共 OAuth Client ID 说明**：默认内置的公开客户端 ID 来自 Hermes Agent（`b1a00492-073a-47ea-816f-4c329264a828`）。在浏览器授权确认页面中可能会显示该客户端标识名称。如需使用专属客户端，可通过 `XAI_OAUTH_CLIENT_ID` 环境变量配置。
+4. **OAuth 成功不等于搜索可用**：OAuth 设备码登录成功仅代表获得 xAI 账号凭证，实际搜索能力及并发额度由 xAI 云端及订阅权益决定；登录成功不保证账号一定具备 X Search 权限。
+5. **无引用不可作为确证**：当结果标记为 `has_citations: false` / `degraded: true` 时，表示上游未返回任何经过验证的 URL 引用，该回答不可作为来源充分的 X 检索事实依据。
+6. **计费与回退规则**：
+   - API Key 模式下按调用量付费（api_metered）。
+   - 显式 `oauth` 模式下仅使用订阅令牌，**绝不回退**到付费 API Key，避免产生非预期账单。
+   - `auto` 模式优先使用 API Key（如果配置），无 Key 时使用本地保存的 OAuth。
+7. **重试消耗**：网络波动或 5xx 错误时会执行有限次数退避重试，重试请求可能重复消耗上游额度。
+8. **过滤作用域限制**：xAI 接口的 `allowed_x_handles`、`excluded_x_handles`、`from_date` 和 `to_date` 过滤主要作用于关键词与语义搜索阶段，并不严格保证限制上游服务端内部的级联线程抓取（thread fetch）。
+
+---
+
+## 凭证配置
+
+### 方式 1：API Key（按量计费）
+
+直接设置环境变量或指向私有文件：
+```bash
+export XAI_API_KEY="xai-xxxxxxxxxxxxxxxxxxxx"
+# 或
+export XAI_API_KEY_FILE="/path/to/private/xai-key.txt"
+```
+
+### 方式 2：Grok 订阅 OAuth（设备码流程）
+
+无需购买 API Key，使用包含 X Search 权益的 xAI 账号直接在终端完成登录：
+
+```bash
+# 执行设备码登录
+x-search-mcp auth login
+```
+
+终端将输出授权网址与用户确认码：
+```text
+1. Visit the authorization page: https://auth.x.ai/oauth2/device/code
+2. Confirm code: ABCD-EFGH
+3. Code expires at: 20:30:00
+Waiting for browser authorization...
+```
+在浏览器中打开链接、输入确认码并批准后，令牌将原子写入本地配置文件：
+- 默认路径：`~/.config/x-search-mcp/auth.json`（权限 `0600`，目录权限 `0700`）
+- 自定义路径：可通过 `X_SEARCH_AUTH_FILE` 覆盖。
+
+### 凭证状态与注销
+
+```bash
+# 查看凭证配置状态（不探测额度、不泄露密钥内容）
+x-search-mcp auth status
+
+# 清除本地 OAuth 令牌文件（不影响云端授权及 API Key）
+x-search-mcp auth logout
+```
+
+---
+
+## CLI 命令一览
+
+| 命令 | 说明 |
+|---|---|
+| `x-search-mcp` 或 `x-search-mcp --stdio` | 默认启动 MCP stdio 服务（供 Agent 客户端调用） |
+| `x-search-mcp auth login` | 发起 OAuth 设备码登录并在终端交互 |
+| `x-search-mcp auth status` | 安全输出当前认证模式、Key/OAuth 就绪状态 |
+| `x-search-mcp auth logout` | 在文件锁保护下安全删除本地 OAuth 凭据 |
+| `x-search-mcp config` | 打印安全的标准 `mcpServers` JSON 配置（不导出密钥） |
+| `x-search-mcp search "<query>"` | 直接在命令行测试搜索并输出结构化 JSON |
+
+---
+
+## 环境变量参考
+
+| 变量名 | 默认值 | 说明 |
+|---|---|---|
+| `XAI_API_KEY` | - | xAI API Key（优先级高于文件） |
+| `XAI_API_KEY_FILE` | - | 存放 API Key 的私有文件路径 |
+| `X_SEARCH_AUTH_MODE` | `auto` | 认证模式：`auto`、`api_key`、`oauth` |
+| `X_SEARCH_AUTH_FILE` | `~/.config/x-search-mcp/auth.json` | 本地 OAuth 凭证文件路径 |
+| `XAI_OAUTH_CLIENT_ID` | `b1a00492-073a-47ea-816f-4c329264a828` | OAuth 公开客户端 ID |
+| `X_SEARCH_MODEL` | `grok-4.5` | 搜索调用模型 |
+| `X_SEARCH_TIMEOUT_SECONDS` | `180` | 请求超时时间（秒，范围 5–600） |
+| `X_SEARCH_RETRIES` | `2` | 失败重试次数（网络/5xx，范围 0–3） |
+| `X_SEARCH_MAX_TURNS` | `4` | 内部搜索轮数（范围 1–20） |
+| `X_SEARCH_REASONING_EFFORT`| - | 思考深度：`low` / `medium` / `high` / `xhigh` |
+| `X_SEARCH_ENV_FILE` | - | 显式指定 `.env` 文件（通过 `process.loadEnvFile` 加载） |
+| `HTTP_PROXY` / `HTTPS_PROXY` | - | 标准 HTTP/HTTPS 代理配置 |
+
+---
+
+## Agent 接入配置
+
+### 1. 通用 mcpServers JSON（Claude Desktop / Cline / Cursor 等）
+
+在目标 Agent 的配置文件中添加：
+
+```json
+{
+  "mcpServers": {
+    "x-search": {
+      "command": "node",
+      "args": ["/Users/scoheart/Code/scoheart/x-search-mcp/bin/x-search-mcp.js"],
+      "env": {
+        "X_SEARCH_AUTH_MODE": "auto",
+        "X_SEARCH_MODEL": "grok-4.5"
+      },
+      "timeout": 600
+    }
+  }
+}
+```
+
+> **提示**：可直接运行 `x-search-mcp config` 生成当前环境下绝对路径的 JSON 模板。修改配置后请重启或重新加载 Agent 会话。
+
+### 2. Codex 配置 (`codex.toml`)
+
+```toml
+[mcp.servers.x-search]
+command = "node"
+args = ["/Users/scoheart/Code/scoheart/x-search-mcp/bin/x-search-mcp.js"]
+timeout = 600
+
+[mcp.servers.x-search.env]
+X_SEARCH_AUTH_MODE = "auto"
+X_SEARCH_MODEL = "grok-4.5"
+```
+
+---
+
+## 工具参数规范 (`x_search`)
+
+```typescript
+interface XSearchInput {
+  query: string;                           // 必填，检索语句（trim 后非空，最大 16000 字符）
+  allowed_x_handles?: string[];            // 可选，白名单账号（最多 10 个，无需 @，与 excluded 互斥）
+  excluded_x_handles?: string[];           // 可选，黑名单账号（最多 10 个，无需 @，与 allowed 互斥）
+  from_date?: string;                      // 可选，开始日期 YYYY-MM-DD（不能晚于当天 UTC，需严格早于 to_date）
+  to_date?: string;                        // 可选，结束日期 YYYY-MM-DD（不包含当天）
+  enable_image_understanding?: boolean;    // 可选，是否启用推文配图理解
+  enable_video_understanding?: boolean;    // 可选，是否启用推文视频理解
+  auth_mode?: 'auto' | 'api_key' | 'oauth';// 可选，单次调用的认证覆盖模式
+}
+```
+
+### 返回结构示例
+
+```json
+{
+  "success": true,
+  "provider": "xai",
+  "tool": "x_search",
+  "model": "grok-4.5",
+  "query": "OpenAI Sora news",
+  "credential_source": "oauth",
+  "billing_mode": "subscription_oauth",
+  "answer": "最新动态包括...",
+  "citations": [
+    "https://x.com/OpenAI/status/123456789"
+  ],
+  "inline_citations": [
+    {
+      "url": "https://x.com/OpenAI/status/123456789",
+      "title": "OpenAI on X",
+      "start_index": 12,
+      "end_index": 35
+    }
+  ],
+  "has_citations": true,
+  "degraded": false,
+  "degraded_reason": null,
+  "search_execution": "observed",
+  "server_side_calls": [
+    {
+      "call_id": "xs_123456",
+      "name": "x_keyword_search",
+      "arguments": { "query": "OpenAI Sora" }
+    }
+  ],
+  "response_status": "completed",
+  "incomplete_details": null,
+  "usage": {
+    "prompt_tokens": 800,
+    "completion_tokens": 350
+  },
+  "warnings": [
+    "OAuth subscription search availability and quota are determined upstream by xAI; successful login does not guarantee search availability."
+  ]
+}
+```
