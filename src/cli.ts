@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { startStdio } from './server.js';
 import { loginWithDeviceCode, getAuthStatus, logout } from './auth.js';
 import { executeSearch } from './search.js';
+import { listCallLogs } from './call-log.js';
 import { loadConfig } from './config.js';
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
@@ -99,6 +100,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     } catch (err: any) {
       console.error(JSON.stringify({
         success: false,
+        log_file: err.logFile || null,
         error: {
           code: err.code || 'SEARCH_ERROR',
           message: err.message,
@@ -110,6 +112,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (command === 'logs') {
+    const listed = await listCallLogs();
+    console.log(JSON.stringify(listed, null, 2));
+    return;
+  }
+
   console.error(`Unknown command: ${command}`);
   console.error('Available commands:');
   console.error('  x-search-mcp [--stdio]           Start MCP server over stdio');
@@ -118,5 +126,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   console.error('  x-search-mcp auth logout         Delete local OAuth token file');
   console.error('  x-search-mcp config              Print mcpServers JSON configuration');
   console.error('  x-search-mcp search "<query>"    Direct search query');
+  console.error('  x-search-mcp logs                 List recent local call logs');
   process.exit(1);
 }

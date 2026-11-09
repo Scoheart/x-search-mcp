@@ -57,6 +57,16 @@ function parseAuthMode(val) {
     }
     return mode;
 }
+function parseEnabled(val, name, defaultVal) {
+    if (val === undefined || val === null || val === '')
+        return defaultVal;
+    const normalized = val.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes'].includes(normalized))
+        return true;
+    if (['0', 'false', 'off', 'no'].includes(normalized))
+        return false;
+    throw new Error(`Configuration error: ${name} must be on or off, got: ${val}`);
+}
 function parseReasoningEffort(val) {
     if (!val)
         return undefined;
@@ -83,6 +93,12 @@ export function loadConfig() {
         maxTurns: parseBoundedInt(process.env.X_SEARCH_MAX_TURNS, 'X_SEARCH_MAX_TURNS', 1, 20, 4),
         reasoningEffort: parseReasoningEffort(process.env.X_SEARCH_REASONING_EFFORT),
         apiKey: getApiKey(),
+        logEnabled: parseEnabled(process.env.X_SEARCH_LOG, 'X_SEARCH_LOG', true),
+        logDir: process.env.X_SEARCH_LOG_DIR
+            ? path.resolve(process.env.X_SEARCH_LOG_DIR)
+            : path.join(defaultAuthDir, 'logs'),
+        logKeep: parseBoundedInt(process.env.X_SEARCH_LOG_KEEP, 'X_SEARCH_LOG_KEEP', 0, 10000, 100),
+        logMaxBytes: parseBoundedInt(process.env.X_SEARCH_LOG_MAX_BYTES, 'X_SEARCH_LOG_MAX_BYTES', 4096, 33554432, 8388608),
     };
 }
 //# sourceMappingURL=config.js.map

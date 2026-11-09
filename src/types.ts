@@ -13,6 +13,10 @@ export interface Config {
   maxTurns: number;
   reasoningEffort?: ReasoningEffort;
   apiKey: string | null;
+  logEnabled: boolean;
+  logDir: string;
+  logKeep: number;
+  logMaxBytes: number;
 }
 
 export interface XSearchInput {
@@ -39,6 +43,28 @@ export interface ServerSideCall {
   arguments: any;
 }
 
+export interface CallLogAttempt {
+  http_status: number | null;
+  raw_response: unknown;
+  raw_response_truncated?: boolean;
+  raw_response_bytes?: number;
+  error: { code: string; message: string; status: number | null } | null;
+}
+
+export interface CallLogEntry {
+  started_at: string;
+  elapsed_ms: number;
+  endpoint: string;
+  model: string;
+  query: string;
+  credential_source: 'api_key' | 'oauth' | null;
+  billing_mode: 'api_metered' | 'subscription_oauth' | null;
+  request: unknown;
+  attempts: CallLogAttempt[];
+  outcome: 'success' | 'error';
+  error: { code: string; message: string; status: number | null } | null;
+}
+
 export interface XSearchResult {
   success: boolean;
   provider: 'xai';
@@ -59,6 +85,7 @@ export interface XSearchResult {
   incomplete_details: any;
   usage: any;
   warnings: string[];
+  log_file: string | null;
 }
 
 export interface AuthTokens {

@@ -20,8 +20,5 @@ export declare function validateSearchParams(params: Record<string, any>): XSear
 export interface ExecuteSearchOptions {
     signal?: AbortSignal;
 }
-/**
- * Execute x_search call against xAI responses API.
- */
 export declare function executeSearch(rawParams: Record<string, any>, { signal }?: ExecuteSearchOptions): Promise<XSearchResult>;
 //# sourceMappingURL=search.d.ts.map

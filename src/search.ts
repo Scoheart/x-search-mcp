@@ -1,5 +1,6 @@
 import { sendHttpRequest, HttpError } from './http.js';
 import { loadConfig } from './config.js';
+import { writeCallLog } from './call-log.js';
 import { getValidOAuthAccessToken, forceRefreshToken } from './auth.js';
 import type {
   XSearchInput,
@@ -7,6 +8,7 @@ import type {
   InlineCitation,
   ServerSideCall,
   AuthMode,
+  CallLogAttempt,
 } from './types.js';
 
 const XAI_RESPONSES_URL = 'https://api.x.ai/v1/responses';
@@ -210,15 +212,64 @@ export interface ExecuteSearchOptions {
 /**
  * Execute x_search call against xAI responses API.
  */
+function errorInfo(err: any): { code: string; message: string; status: number | null } {
+  return {
+    code: err?.code || 'SEARCH_ERROR',
+    message: err?.message || 'Search execution failed',
+    status: err?.status ?? null,
+  };
+}
+
+function attemptFromError(err: any): CallLogAttempt {
+  return {
+    http_status: err?.status ?? null,
+    raw_response: err instanceof HttpError ? err.data ?? null : null,
+    error: errorInfo(err),
+  };
+}
+
 export async function executeSearch(rawParams: Record<string, any>, { signal }: ExecuteSearchOptions = {}): Promise<XSearchResult> {
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const attempts: CallLogAttempt[] = [];
+  let requestBody: Record<string, any> | null = null;
+  let credentialSource: 'api_key' | 'oauth' | null = null;
+  let billingMode: 'api_metered' | 'subscription_oauth' | null = null;
+  let model = '';
+  let query = typeof rawParams?.query === 'string' ? rawParams.query : '';
+
+  const persist = async (outcome: 'success' | 'error', error: { code: string; message: string; status: number | null } | null) => {
+    try {
+      const logFile = await writeCallLog({
+        started_at: startedAt,
+        elapsed_ms: Date.now() - startedMs,
+        endpoint: XAI_RESPONSES_URL,
+        model,
+        query,
+        credential_source: credentialSource,
+        billing_mode: billingMode,
+        request: requestBody,
+        attempts,
+        outcome,
+        error,
+      });
+      if (logFile) console.error(`x-search-mcp call_log=${logFile}`);
+      return logFile;
+    } catch (err: any) {
+      console.error(`x-search-mcp call_log_error=${err?.message || 'failed to write call log'}`);
+      return null;
+    }
+  };
+
+  try {
   // Step 1: Strict parameter validation BEFORE credentials and network
   const validated = validateSearchParams(rawParams);
+  query = validated.query;
   const config = loadConfig();
+  model = config.model;
 
   // Step 2: Credential resolution
   const effectiveAuthMode = validated.auth_mode || config.authMode;
-  let credentialSource: 'api_key' | 'oauth';
-  let billingMode: 'api_metered' | 'subscription_oauth';
   let token: string;
 
   if (effectiveAuthMode === 'api_key') {
@@ -260,7 +311,7 @@ export async function executeSearch(rawParams: Record<string, any>, { signal }: 
   if (validated.enable_image_understanding !== undefined) toolConfig.enable_image_understanding = validated.enable_image_understanding;
   if (validated.enable_video_understanding !== undefined) toolConfig.enable_video_understanding = validated.enable_video_understanding;
 
-  const requestBody: Record<string, any> = {
+  requestBody = {
     model: config.model,
     input: [
       {
@@ -295,21 +346,27 @@ export async function executeSearch(rawParams: Record<string, any>, { signal }: 
       retries: config.retries,
     });
   } catch (err: any) {
+    attempts.push(attemptFromError(err));
     // If OAuth returns HTTP 401, force-refresh token once and retry once
     if (credentialSource === 'oauth' && err instanceof HttpError && err.status === 401) {
       const freshToken = await forceRefreshToken(token);
-      httpRes = await sendHttpRequest({
-        url: XAI_RESPONSES_URL,
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${freshToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-        signal,
-        timeoutSeconds: config.timeoutSeconds,
-        retries: 0,
-      });
+      try {
+        httpRes = await sendHttpRequest({
+          url: XAI_RESPONSES_URL,
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${freshToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+          signal,
+          timeoutSeconds: config.timeoutSeconds,
+          retries: 0,
+        });
+      } catch (retryErr: any) {
+        attempts.push(attemptFromError(retryErr));
+        throw retryErr;
+      }
     } else {
       throw err;
     }
@@ -317,13 +374,25 @@ export async function executeSearch(rawParams: Record<string, any>, { signal }: 
 
   const rawData = httpRes.data;
   if (!rawData || typeof rawData !== 'object') {
+    attempts.push({
+      http_status: httpRes.status ?? null,
+      raw_response: rawData ?? null,
+      error: {
+        code: 'SEARCH_ERROR',
+        message: 'Upstream xAI API returned empty or unparseable response data',
+        status: httpRes.status ?? null,
+      },
+    });
     throw new Error('Upstream xAI API returned empty or unparseable response data');
   }
+  attempts.push({ http_status: httpRes.status ?? null, raw_response: rawData, error: null });
 
   // Check for upstream error status
   if (rawData.status === 'failed' || rawData.error) {
     const errMsg = rawData.error?.message || 'Upstream xAI response status is failed';
-    throw new HttpError('UPSTREAM_SERVER_ERROR', errMsg, httpRes.status);
+    const upstreamError = new HttpError('UPSTREAM_SERVER_ERROR', errMsg, httpRes.status);
+    attempts[attempts.length - 1].error = errorInfo(upstreamError);
+    throw upstreamError;
   }
 
   // Step 5: Extract answer, citations, inline citations, and tool execution details
@@ -413,7 +482,7 @@ export async function executeSearch(rawParams: Record<string, any>, { signal }: 
     warnings.push('Result contains no source citations and cannot be treated as grounded search evidence.');
   }
 
-  return {
+  const result: XSearchResult = {
     success: true,
     provider: 'xai',
     tool: 'x_search',
@@ -433,5 +502,17 @@ export async function executeSearch(rawParams: Record<string, any>, { signal }: 
     incomplete_details: rawData.incomplete_details || null,
     usage: rawData.usage || null,
     warnings,
+    log_file: null,
   };
+  result.log_file = await persist('success', null);
+  if (config.logEnabled && !result.log_file) {
+    result.warnings.push('Call log could not be written.');
+  }
+  return result;
+  } catch (err: any) {
+    const info = errorInfo(err);
+    const logFile = await persist('error', info);
+    if (err && typeof err === 'object') err.logFile = logFile;
+    throw err;
+  }
 }

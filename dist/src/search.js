@@ -1,5 +1,6 @@
 import { sendHttpRequest, HttpError } from './http.js';
 import { loadConfig } from './config.js';
+import { writeCallLog } from './call-log.js';
 import { getValidOAuthAccessToken, forceRefreshToken } from './auth.js';
 const XAI_RESPONSES_URL = 'https://api.x.ai/v1/responses';
 const ALLOWED_PARAM_KEYS = new Set([
@@ -176,178 +177,245 @@ function sanitizeUrls(rawUrls) {
 /**
  * Execute x_search call against xAI responses API.
  */
+function errorInfo(err) {
+    return {
+        code: err?.code || 'SEARCH_ERROR',
+        message: err?.message || 'Search execution failed',
+        status: err?.status ?? null,
+    };
+}
+function attemptFromError(err) {
+    return {
+        http_status: err?.status ?? null,
+        raw_response: err instanceof HttpError ? err.data ?? null : null,
+        error: errorInfo(err),
+    };
+}
 export async function executeSearch(rawParams, { signal } = {}) {
-    // Step 1: Strict parameter validation BEFORE credentials and network
-    const validated = validateSearchParams(rawParams);
-    const config = loadConfig();
-    // Step 2: Credential resolution
-    const effectiveAuthMode = validated.auth_mode || config.authMode;
-    let credentialSource;
-    let billingMode;
-    let token;
-    if (effectiveAuthMode === 'api_key') {
-        if (!config.apiKey) {
-            throw new Error('Credential error: API key is required when auth_mode is "api_key", but neither XAI_API_KEY nor XAI_API_KEY_FILE was provided.');
+    const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
+    const attempts = [];
+    let requestBody = null;
+    let credentialSource = null;
+    let billingMode = null;
+    let model = '';
+    let query = typeof rawParams?.query === 'string' ? rawParams.query : '';
+    const persist = async (outcome, error) => {
+        try {
+            const logFile = await writeCallLog({
+                started_at: startedAt,
+                elapsed_ms: Date.now() - startedMs,
+                endpoint: XAI_RESPONSES_URL,
+                model,
+                query,
+                credential_source: credentialSource,
+                billing_mode: billingMode,
+                request: requestBody,
+                attempts,
+                outcome,
+                error,
+            });
+            if (logFile)
+                console.error(`x-search-mcp call_log=${logFile}`);
+            return logFile;
         }
-        token = config.apiKey;
-        credentialSource = 'api_key';
-        billingMode = 'api_metered';
-    }
-    else if (effectiveAuthMode === 'oauth') {
-        token = await getValidOAuthAccessToken();
-        credentialSource = 'oauth';
-        billingMode = 'subscription_oauth';
-    }
-    else {
-        // Mode 'auto'
-        if (config.apiKey) {
+        catch (err) {
+            console.error(`x-search-mcp call_log_error=${err?.message || 'failed to write call log'}`);
+            return null;
+        }
+    };
+    try {
+        // Step 1: Strict parameter validation BEFORE credentials and network
+        const validated = validateSearchParams(rawParams);
+        query = validated.query;
+        const config = loadConfig();
+        model = config.model;
+        // Step 2: Credential resolution
+        const effectiveAuthMode = validated.auth_mode || config.authMode;
+        let token;
+        if (effectiveAuthMode === 'api_key') {
+            if (!config.apiKey) {
+                throw new Error('Credential error: API key is required when auth_mode is "api_key", but neither XAI_API_KEY nor XAI_API_KEY_FILE was provided.');
+            }
             token = config.apiKey;
             credentialSource = 'api_key';
             billingMode = 'api_metered';
         }
+        else if (effectiveAuthMode === 'oauth') {
+            token = await getValidOAuthAccessToken();
+            credentialSource = 'oauth';
+            billingMode = 'subscription_oauth';
+        }
         else {
-            try {
-                token = await getValidOAuthAccessToken();
-                credentialSource = 'oauth';
-                billingMode = 'subscription_oauth';
+            // Mode 'auto'
+            if (config.apiKey) {
+                token = config.apiKey;
+                credentialSource = 'api_key';
+                billingMode = 'api_metered';
             }
-            catch {
-                throw new Error('Credential error: No valid credentials found. Provide XAI_API_KEY or authenticate via "x-search-mcp auth login".');
+            else {
+                try {
+                    token = await getValidOAuthAccessToken();
+                    credentialSource = 'oauth';
+                    billingMode = 'subscription_oauth';
+                }
+                catch {
+                    throw new Error('Credential error: No valid credentials found. Provide XAI_API_KEY or authenticate via "x-search-mcp auth login".');
+                }
             }
         }
-    }
-    // Step 3: Construct request body
-    const toolConfig = {
-        type: 'x_search',
-    };
-    if (validated.allowed_x_handles)
-        toolConfig.allowed_x_handles = validated.allowed_x_handles;
-    if (validated.excluded_x_handles)
-        toolConfig.excluded_x_handles = validated.excluded_x_handles;
-    if (validated.from_date)
-        toolConfig.from_date = validated.from_date;
-    if (validated.to_date)
-        toolConfig.to_date = validated.to_date;
-    if (validated.enable_image_understanding !== undefined)
-        toolConfig.enable_image_understanding = validated.enable_image_understanding;
-    if (validated.enable_video_understanding !== undefined)
-        toolConfig.enable_video_understanding = validated.enable_video_understanding;
-    const requestBody = {
-        model: config.model,
-        input: [
-            {
-                role: 'user',
-                content: validated.query,
-            },
-        ],
-        tools: [toolConfig],
-        store: false,
-        max_turns: config.maxTurns,
-    };
-    if (config.reasoningEffort) {
-        requestBody.reasoning = {
-            effort: config.reasoningEffort,
+        // Step 3: Construct request body
+        const toolConfig = {
+            type: 'x_search',
         };
-    }
-    // Step 4: Execute HTTP request with single OAuth 401 refresh retry
-    let httpRes;
-    try {
-        httpRes = await sendHttpRequest({
-            url: XAI_RESPONSES_URL,
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
-            signal,
-            timeoutSeconds: config.timeoutSeconds,
-            retries: config.retries,
-        });
-    }
-    catch (err) {
-        // If OAuth returns HTTP 401, force-refresh token once and retry once
-        if (credentialSource === 'oauth' && err instanceof HttpError && err.status === 401) {
-            const freshToken = await forceRefreshToken(token);
+        if (validated.allowed_x_handles)
+            toolConfig.allowed_x_handles = validated.allowed_x_handles;
+        if (validated.excluded_x_handles)
+            toolConfig.excluded_x_handles = validated.excluded_x_handles;
+        if (validated.from_date)
+            toolConfig.from_date = validated.from_date;
+        if (validated.to_date)
+            toolConfig.to_date = validated.to_date;
+        if (validated.enable_image_understanding !== undefined)
+            toolConfig.enable_image_understanding = validated.enable_image_understanding;
+        if (validated.enable_video_understanding !== undefined)
+            toolConfig.enable_video_understanding = validated.enable_video_understanding;
+        requestBody = {
+            model: config.model,
+            input: [
+                {
+                    role: 'user',
+                    content: validated.query,
+                },
+            ],
+            tools: [toolConfig],
+            store: false,
+            max_turns: config.maxTurns,
+        };
+        if (config.reasoningEffort) {
+            requestBody.reasoning = {
+                effort: config.reasoningEffort,
+            };
+        }
+        // Step 4: Execute HTTP request with single OAuth 401 refresh retry
+        let httpRes;
+        try {
             httpRes = await sendHttpRequest({
                 url: XAI_RESPONSES_URL,
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${freshToken}`,
+                    'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify(requestBody),
                 signal,
                 timeoutSeconds: config.timeoutSeconds,
-                retries: 0,
+                retries: config.retries,
             });
         }
-        else {
-            throw err;
-        }
-    }
-    const rawData = httpRes.data;
-    if (!rawData || typeof rawData !== 'object') {
-        throw new Error('Upstream xAI API returned empty or unparseable response data');
-    }
-    // Check for upstream error status
-    if (rawData.status === 'failed' || rawData.error) {
-        const errMsg = rawData.error?.message || 'Upstream xAI response status is failed';
-        throw new HttpError('UPSTREAM_SERVER_ERROR', errMsg, httpRes.status);
-    }
-    // Step 5: Extract answer, citations, inline citations, and tool execution details
-    let answerText = '';
-    if (typeof rawData.output_text === 'string' && rawData.output_text.trim()) {
-        answerText = rawData.output_text.trim();
-    }
-    const collectedCitations = [];
-    const inlineCitations = [];
-    const serverSideCalls = [];
-    // Top-level sources or citations
-    if (Array.isArray(rawData.citations)) {
-        collectedCitations.push(...rawData.citations);
-    }
-    if (Array.isArray(rawData.sources)) {
-        collectedCitations.push(...rawData.sources);
-    }
-    // Parse output items
-    if (Array.isArray(rawData.output)) {
-        for (const item of rawData.output) {
-            const callId = item.call_id || item.id || '';
-            const toolName = item.name || item.tool_name || '';
-            const isXSearchCall = callId.startsWith('xs_') || X_SEARCH_INTERNAL_TOOLS.has(toolName);
-            if (item.type === 'custom_tool_call' || isXSearchCall) {
-                serverSideCalls.push({
-                    call_id: callId || null,
-                    name: toolName || null,
-                    arguments: item.arguments || item.input || null,
-                });
-            }
-            const message = item.message || item;
-            if (message.content) {
-                if (typeof message.content === 'string' && !answerText) {
-                    answerText += (answerText ? '\n\n' : '') + message.content.trim();
+        catch (err) {
+            attempts.push(attemptFromError(err));
+            // If OAuth returns HTTP 401, force-refresh token once and retry once
+            if (credentialSource === 'oauth' && err instanceof HttpError && err.status === 401) {
+                const freshToken = await forceRefreshToken(token);
+                try {
+                    httpRes = await sendHttpRequest({
+                        url: XAI_RESPONSES_URL,
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${freshToken}`,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(requestBody),
+                        signal,
+                        timeoutSeconds: config.timeoutSeconds,
+                        retries: 0,
+                    });
                 }
-                else if (Array.isArray(message.content)) {
-                    for (const block of message.content) {
-                        if (!answerText) {
-                            const textPiece = block.output_text || block.text;
-                            if (typeof textPiece === 'string') {
-                                answerText += (answerText ? '\n\n' : '') + textPiece.trim();
+                catch (retryErr) {
+                    attempts.push(attemptFromError(retryErr));
+                    throw retryErr;
+                }
+            }
+            else {
+                throw err;
+            }
+        }
+        const rawData = httpRes.data;
+        if (!rawData || typeof rawData !== 'object') {
+            attempts.push({
+                http_status: httpRes.status ?? null,
+                raw_response: rawData ?? null,
+                error: {
+                    code: 'SEARCH_ERROR',
+                    message: 'Upstream xAI API returned empty or unparseable response data',
+                    status: httpRes.status ?? null,
+                },
+            });
+            throw new Error('Upstream xAI API returned empty or unparseable response data');
+        }
+        attempts.push({ http_status: httpRes.status ?? null, raw_response: rawData, error: null });
+        // Check for upstream error status
+        if (rawData.status === 'failed' || rawData.error) {
+            const errMsg = rawData.error?.message || 'Upstream xAI response status is failed';
+            const upstreamError = new HttpError('UPSTREAM_SERVER_ERROR', errMsg, httpRes.status);
+            attempts[attempts.length - 1].error = errorInfo(upstreamError);
+            throw upstreamError;
+        }
+        // Step 5: Extract answer, citations, inline citations, and tool execution details
+        let answerText = '';
+        if (typeof rawData.output_text === 'string' && rawData.output_text.trim()) {
+            answerText = rawData.output_text.trim();
+        }
+        const collectedCitations = [];
+        const inlineCitations = [];
+        const serverSideCalls = [];
+        // Top-level sources or citations
+        if (Array.isArray(rawData.citations)) {
+            collectedCitations.push(...rawData.citations);
+        }
+        if (Array.isArray(rawData.sources)) {
+            collectedCitations.push(...rawData.sources);
+        }
+        // Parse output items
+        if (Array.isArray(rawData.output)) {
+            for (const item of rawData.output) {
+                const callId = item.call_id || item.id || '';
+                const toolName = item.name || item.tool_name || '';
+                const isXSearchCall = callId.startsWith('xs_') || X_SEARCH_INTERNAL_TOOLS.has(toolName);
+                if (item.type === 'custom_tool_call' || isXSearchCall) {
+                    serverSideCalls.push({
+                        call_id: callId || null,
+                        name: toolName || null,
+                        arguments: item.arguments || item.input || null,
+                    });
+                }
+                const message = item.message || item;
+                if (message.content) {
+                    if (typeof message.content === 'string' && !answerText) {
+                        answerText += (answerText ? '\n\n' : '') + message.content.trim();
+                    }
+                    else if (Array.isArray(message.content)) {
+                        for (const block of message.content) {
+                            if (!answerText) {
+                                const textPiece = block.output_text || block.text;
+                                if (typeof textPiece === 'string') {
+                                    answerText += (answerText ? '\n\n' : '') + textPiece.trim();
+                                }
                             }
-                        }
-                        if (Array.isArray(block.annotations)) {
-                            for (const ann of block.annotations) {
-                                if (ann && (ann.type === 'url_citation' || ann.url)) {
-                                    const urlStr = ann.url || ann.citation?.url;
-                                    if (typeof urlStr === 'string' && (urlStr.startsWith('http://') || urlStr.startsWith('https://'))) {
-                                        inlineCitations.push({
-                                            url: urlStr,
-                                            title: ann.title || ann.citation?.title || null,
-                                            start_index: typeof ann.start_index === 'number' ? ann.start_index : null,
-                                            end_index: typeof ann.end_index === 'number' ? ann.end_index : null,
-                                        });
-                                        collectedCitations.push(urlStr);
+                            if (Array.isArray(block.annotations)) {
+                                for (const ann of block.annotations) {
+                                    if (ann && (ann.type === 'url_citation' || ann.url)) {
+                                        const urlStr = ann.url || ann.citation?.url;
+                                        if (typeof urlStr === 'string' && (urlStr.startsWith('http://') || urlStr.startsWith('https://'))) {
+                                            inlineCitations.push({
+                                                url: urlStr,
+                                                title: ann.title || ann.citation?.title || null,
+                                                start_index: typeof ann.start_index === 'number' ? ann.start_index : null,
+                                                end_index: typeof ann.end_index === 'number' ? ann.end_index : null,
+                                            });
+                                            collectedCitations.push(urlStr);
+                                        }
                                     }
                                 }
                             }
@@ -356,42 +424,55 @@ export async function executeSearch(rawParams, { signal } = {}) {
                 }
             }
         }
+        const finalCitations = sanitizeUrls(collectedCitations);
+        const hasCitations = finalCitations.length > 0 || inlineCitations.length > 0;
+        const degraded = !hasCitations;
+        const degradedReason = degraded ? 'No source citations returned by upstream x_search' : null;
+        if (!answerText && !hasCitations) {
+            throw new Error('Upstream returned no answer and no citations');
+        }
+        const searchExecution = serverSideCalls.length > 0 ? 'observed' : 'unreported';
+        const warnings = [];
+        if (credentialSource === 'oauth') {
+            warnings.push('OAuth subscription search availability and quota are determined upstream by xAI; successful login does not guarantee search availability.');
+        }
+        if (degraded) {
+            warnings.push('Result contains no source citations and cannot be treated as grounded search evidence.');
+        }
+        const result = {
+            success: true,
+            provider: 'xai',
+            tool: 'x_search',
+            model: config.model,
+            query: validated.query,
+            credential_source: credentialSource,
+            billing_mode: billingMode,
+            answer: answerText,
+            citations: finalCitations,
+            inline_citations: inlineCitations,
+            has_citations: hasCitations,
+            degraded,
+            degraded_reason: degradedReason,
+            search_execution: searchExecution,
+            server_side_calls: serverSideCalls,
+            response_status: rawData.status || 'completed',
+            incomplete_details: rawData.incomplete_details || null,
+            usage: rawData.usage || null,
+            warnings,
+            log_file: null,
+        };
+        result.log_file = await persist('success', null);
+        if (config.logEnabled && !result.log_file) {
+            result.warnings.push('Call log could not be written.');
+        }
+        return result;
     }
-    const finalCitations = sanitizeUrls(collectedCitations);
-    const hasCitations = finalCitations.length > 0 || inlineCitations.length > 0;
-    const degraded = !hasCitations;
-    const degradedReason = degraded ? 'No source citations returned by upstream x_search' : null;
-    if (!answerText && !hasCitations) {
-        throw new Error('Upstream returned no answer and no citations');
+    catch (err) {
+        const info = errorInfo(err);
+        const logFile = await persist('error', info);
+        if (err && typeof err === 'object')
+            err.logFile = logFile;
+        throw err;
     }
-    const searchExecution = serverSideCalls.length > 0 ? 'observed' : 'unreported';
-    const warnings = [];
-    if (credentialSource === 'oauth') {
-        warnings.push('OAuth subscription search availability and quota are determined upstream by xAI; successful login does not guarantee search availability.');
-    }
-    if (degraded) {
-        warnings.push('Result contains no source citations and cannot be treated as grounded search evidence.');
-    }
-    return {
-        success: true,
-        provider: 'xai',
-        tool: 'x_search',
-        model: config.model,
-        query: validated.query,
-        credential_source: credentialSource,
-        billing_mode: billingMode,
-        answer: answerText,
-        citations: finalCitations,
-        inline_citations: inlineCitations,
-        has_citations: hasCitations,
-        degraded,
-        degraded_reason: degradedReason,
-        search_execution: searchExecution,
-        server_side_calls: serverSideCalls,
-        response_status: rawData.status || 'completed',
-        incomplete_details: rawData.incomplete_details || null,
-        usage: rawData.usage || null,
-        warnings,
-    };
 }
 //# sourceMappingURL=search.js.map

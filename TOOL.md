@@ -82,6 +82,7 @@ x-search-mcp auth logout
 | `x-search-mcp auth logout` | 在文件锁保护下安全删除本地 OAuth 凭据 |
 | `x-search-mcp config` | 打印安全的标准 `mcpServers` JSON 配置（不导出密钥） |
 | `x-search-mcp search "<query>"` | 直接在命令行测试搜索并输出结构化 JSON |
+| `x-search-mcp logs` | 列出最近的本地调用日志路径 |
 
 ---
 
@@ -100,9 +101,26 @@ x-search-mcp auth logout
 | `X_SEARCH_MAX_TURNS` | `4` | 内部搜索轮数（范围 1–20） |
 | `X_SEARCH_REASONING_EFFORT`| - | 思考深度：`low` / `medium` / `high` / `xhigh` |
 | `X_SEARCH_ENV_FILE` | - | 显式指定 `.env` 文件（通过 `process.loadEnvFile` 加载） |
+| `X_SEARCH_LOG` | `on` | 是否保存调用日志：`on` / `off` |
+| `X_SEARCH_LOG_DIR` | `~/.config/x-search-mcp/logs` | 调用日志目录 |
+| `X_SEARCH_LOG_KEEP` | `100` | 保留最近多少份日志；`0` 表示不清理 |
+| `X_SEARCH_LOG_MAX_BYTES` | `8388608` | 单次原始响应写入上限；超出后截断并标记 |
 | `HTTP_PROXY` / `HTTPS_PROXY` | - | 标准 HTTP/HTTPS 代理配置 |
 
 ---
+
+## 调用日志
+
+每次 `x_search` 都会在本地写一份 JSON 日志，里面是发给 xAI 的请求体和上游原始响应。MCP 结果只返回 `log_file` 路径，不把原始响应塞回工具输出。
+
+- 默认目录：`~/.config/x-search-mcp/logs/`
+- 文件权限：`0600`，目录权限：`0700`
+- 字段：`request`、`attempts[].raw_response`、顶层 `raw_response`（最后一次尝试）
+- 凭证处理：不记录 `Authorization`；`access_token`、`api_key` 等字段以及 `Bearer` / `xai-` 形态的字符串会替换成 `[redacted]`
+- 失败调用也会写日志。HTTP 错误正文只进本地文件，不回传给 MCP 客户端
+- 查看最近日志：`x-search-mcp logs`
+
+日志写入失败不会让搜索失败；结果的 `warnings` 会说明日志没写上。
 
 ## Agent 接入配置
 
@@ -198,6 +216,7 @@ interface XSearchInput {
     "prompt_tokens": 800,
     "completion_tokens": 350
   },
+  "log_file": "/Users/username/.config/x-search-mcp/logs/call-20260814T120000000Z-ab12cd.json",
   "warnings": [
     "OAuth subscription search availability and quota are determined upstream by xAI; successful login does not guarantee search availability."
   ]

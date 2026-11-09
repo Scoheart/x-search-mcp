@@ -103,6 +103,6 @@ Multiple local agent instances share the same `auth.json`. To prevent concurrent
 
 ## 5. Security & Privacy Guarantees
 
-- **No Credential Echoing**: Upstream error bodies are never returned verbatim to clients to eliminate accidental credential leakage.
+- **No Credential Echoing**: Upstream error bodies are never returned verbatim to MCP clients. Each call still writes a local `0600` JSON log containing the request body and raw upstream response; credential fields and token-shaped strings are redacted before that write. The client receives only `log_file`.
 - **Strict HTTPS and Domain Verification**: OAuth discovery and token endpoints must strictly resolve to `https://*.x.ai` on port 443 with no embedded URL credentials.
 - **Redirect Isolation**: HTTP client does not automatically follow redirects with authorization headers (`maxRedirections: 0`).

@@ -45,7 +45,7 @@ const searchInputSchema = {
 };
 
 const toolDefinition = {
-  description: 'Search X (formerly Twitter) using xAI responses API with real-time index, account filters, and date ranges.',
+  description: 'Search X (formerly Twitter) using xAI responses API with real-time index, account filters, and date ranges. Each call saves a local log of the raw upstream response; the path is returned as log_file.',
   inputSchema: searchInputSchema,
   annotations: {
     readOnlyHint: true,
@@ -73,6 +73,7 @@ const toolHandler = async (params: any, extra: any) => {
       success: false,
       provider: 'xai',
       tool: 'x_search',
+      log_file: err.logFile || null,
       error: {
         code: err.code || 'SEARCH_ERROR',
         message: err.message || 'Search execution failed',
