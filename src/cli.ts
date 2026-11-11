@@ -1,6 +1,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startStdio } from './server.js';
+import { createServer, startStdio } from './server.js';
+import { startHttp } from './http-server.js';
+import { loadHttpOptions } from './http-config.js';
 import { loginWithDeviceCode, getAuthStatus, logout } from './auth.js';
 import { executeSearch } from './search.js';
 import { listCallLogs } from './call-log.js';
@@ -8,6 +10,44 @@ import { loadConfig } from './config.js';
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   const [command, subCommand, ...rest] = argv;
+
+  if (command === '--help' || command === '-h' || command === 'help'
+    || ((command === 'http' || command === '--http') && argv.slice(1).some(value => value === '--help' || value === '-h'))) {
+    console.log(`Usage: x-search-mcp [--stdio] | http [options] | auth <login|status|logout> | config | search "<query>" | logs
+
+Default: start the stdio MCP server. Use http (or --http) for native Streamable HTTP.
+
+HTTP options:
+  --host <address>          Bind address (default: 127.0.0.1)
+  --port <number>           TCP port (default: 8000; 0 chooses an available port)
+  --path <path>             MCP endpoint (default: /mcp)
+  --token-file <file>       Private file containing the HTTP bearer token
+  --allowed-host <hostname> Allow an additional Host hostname; repeatable, no ports
+  --allowed-origin <url>    Allow an exact browser origin; repeatable
+
+HTTP credentials: X_SEARCH_HTTP_TOKEN or X_SEARCH_HTTP_TOKEN_FILE.
+Other HTTP environment defaults: X_SEARCH_HTTP_HOST, X_SEARCH_HTTP_PORT,
+X_SEARCH_HTTP_PATH, X_SEARCH_HTTP_ALLOWED_HOSTS, X_SEARCH_HTTP_ALLOWED_ORIGINS.
+Grok credentials remain server-side; HTTP access uses its own bearer token.`);
+    return;
+  }
+
+  if (command === 'http' || command === '--http') {
+    const service = await startHttp(createServer, loadHttpOptions(argv.slice(1)));
+    const stop = () => {
+      void service.close().catch(() => {
+        console.error('Could not shut down the HTTP MCP service cleanly');
+        process.exitCode = 1;
+      }).finally(() => {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      });
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+    console.error(`x-search-mcp HTTP listening at ${service.url}`);
+    return;
+  }
 
   // Default: run stdio MCP server
   if (!command || command === '--stdio') {
@@ -121,6 +161,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   console.error(`Unknown command: ${command}`);
   console.error('Available commands:');
   console.error('  x-search-mcp [--stdio]           Start MCP server over stdio');
+  console.error('  x-search-mcp http [options]      Start authenticated Streamable HTTP');
   console.error('  x-search-mcp auth login          Login with xAI OAuth Device Flow');
   console.error('  x-search-mcp auth status         Show credentials status (safe)');
   console.error('  x-search-mcp auth logout         Delete local OAuth token file');

@@ -2,10 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { executeSearch } from './search.js';
-export const server = new McpServer({
-    name: 'x-search-mcp',
-    version: '0.1.0',
-});
+import { version } from './version.js';
 const searchInputSchema = {
     query: z
         .string()
@@ -51,9 +48,9 @@ const toolDefinition = {
         openWorldHint: true,
     },
 };
-const toolHandler = async (params, extra) => {
+const toolHandler = async (params, context) => {
     try {
-        const signal = extra?.signal;
+        const signal = context.mcpReq.signal;
         const result = await executeSearch(params, { signal });
         return {
             content: [
@@ -62,7 +59,7 @@ const toolHandler = async (params, extra) => {
                     text: JSON.stringify(result, null, 2),
                 },
             ],
-            structuredContent: result,
+            structuredContent: { ...result },
         };
     }
     catch (err) {
@@ -89,18 +86,39 @@ const toolHandler = async (params, extra) => {
         };
     }
 };
-if (typeof server.registerTool === 'function') {
-    server.registerTool('x_search', toolDefinition, toolHandler);
+export function createServer() {
+    const instance = new McpServer({ name: 'x-search-mcp', version });
+    const active = new Set();
+    let closing;
+    instance.registerTool('x_search', toolDefinition, (params, context) => {
+        if (closing)
+            throw new Error('MCP server is closing');
+        const task = toolHandler(params, context);
+        active.add(task);
+        void task.then(() => { active.delete(task); }, () => { active.delete(task); });
+        return task;
+    });
+    // The modern SDK closes the underlying Server directly; legacy code closes
+    // McpServer. Owning the underlying close covers both entry points.
+    const closeTransport = instance.server.close.bind(instance.server);
+    instance.server.close = () => {
+        closing ??= Promise.resolve().then(async () => {
+            await closeTransport();
+            // Cancel queued/search work, but finish any already accepted credential rotation.
+            await Promise.allSettled([...active]);
+        });
+        return closing;
+    };
+    return instance;
 }
-else if (typeof server.tool === 'function') {
-    server.tool('x_search', toolDefinition.description, toolDefinition.inputSchema, toolDefinition.annotations, toolHandler);
-}
+/** @deprecated Create a fresh server with createServer() for each transport. */
+export const server = createServer();
 /**
  * Launch stdio server.
  * stdout is strictly reserved for JSON-RPC MCP messages.
  * Diagnostic logs are written to stderr.
  */
 export function startStdio() {
-    return serveStdio(() => server);
+    return serveStdio(createServer);
 }
 //# sourceMappingURL=server.js.map

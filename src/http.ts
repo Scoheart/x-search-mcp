@@ -1,4 +1,5 @@
 import { request, EnvHttpProxyAgent } from 'undici';
+import { version } from './version.js';
 
 // Global HTTP proxy agent reading standard environment variables: HTTP_PROXY, HTTPS_PROXY, NO_PROXY
 const proxyAgent = new EnvHttpProxyAgent();
@@ -115,6 +116,7 @@ export async function sendHttpRequest({
     signal?.addEventListener('abort', abortHandler, { once: true });
 
     let response: any;
+    let responseText = '';
     let timedOut = false;
     let cancelled = false;
 
@@ -122,13 +124,15 @@ export async function sendHttpRequest({
       response = await request(url, {
         method: method as any,
         headers: {
-          'User-Agent': 'x-search-mcp/0.1.0',
+          'User-Agent': `x-search-mcp/${version}`,
           ...headers,
         },
         body: body as any,
         dispatcher: proxyAgent,
         signal: timeoutController.signal,
       });
+      // Keep the deadline and client cancellation attached through body consumption.
+      responseText = await response.body.text();
     } catch (err: any) {
       if (signal?.aborted || err?.message === 'CANCELLED') {
         cancelled = true;
@@ -165,17 +169,9 @@ export async function sendHttpRequest({
     // Retry on 5xx errors if remaining retries
     if (status >= 500 && status < 600 && attempt < maxRetries) {
       attempt++;
-      await response.body.dump();
       const backoffMs = Math.min(1500 * attempt, 5000);
       await sleep(backoffMs, signal);
       continue;
-    }
-
-    let responseText = '';
-    try {
-      responseText = await response.body.text();
-    } catch (readErr: any) {
-      throw new HttpError('NETWORK_ERROR', `Failed reading response body: ${readErr.message}`);
     }
 
     let parsedData: any = null;
@@ -189,7 +185,7 @@ export async function sendHttpRequest({
     }
 
     if (status >= 400) {
-      throw createSanitizedHttpError(status, parsedData);
+      throw createSanitizedHttpError(status, parsedData ?? responseText);
     }
 
     return {

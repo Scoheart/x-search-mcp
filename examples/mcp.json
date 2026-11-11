@@ -1,9 +1,10 @@
 {
   "mcpServers": {
     "x-search": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/Users/scoheart/Code/scoheart/x-search-mcp/bin/x-search-mcp.js"
+        "--yes",
+        "@scoheart/x-search-mcp@0.2.0"
       ],
       "env": {
         "X_SEARCH_AUTH_MODE": "auto",

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import lockfile from 'proper-lockfile';
 import { sendHttpRequest, HttpError } from './http.js';
 import { loadConfig } from './config.js';
@@ -17,6 +18,39 @@ const LOCK_OPTIONS = {
         factor: 1.1,
     },
 };
+function throwIfCancelled(signal) {
+    if (signal?.aborted)
+        throw new HttpError('cancelled', 'Request was cancelled by client');
+}
+/** Keep the cross-process lease, but own its retry timers so a cancelled waiter stops. */
+async function acquireAuthLock(file, signal) {
+    for (let attempt = 0;; attempt++) {
+        throwIfCancelled(signal);
+        let release;
+        try {
+            release = await lockfile.lock(file, { ...LOCK_OPTIONS, retries: 0 });
+        }
+        catch (error) {
+            throwIfCancelled(signal);
+            if (error.code !== 'ELOCKED' || attempt >= LOCK_OPTIONS.retries.retries)
+                throw error;
+            const wait = Math.min(LOCK_OPTIONS.retries.maxTimeout, LOCK_OPTIONS.retries.minTimeout * LOCK_OPTIONS.retries.factor ** attempt);
+            try {
+                await delay(wait, undefined, { signal });
+            }
+            catch (error) {
+                throwIfCancelled(signal);
+                throw error;
+            }
+            continue;
+        }
+        if (signal?.aborted) {
+            await release();
+            throwIfCancelled(signal);
+        }
+        return release;
+    }
+}
 /**
  * Validate that an OAuth URL is secure and points strictly to an authorized x.ai domain.
  */
@@ -267,6 +301,8 @@ async function performTokenRefreshUnderLock(authData, authFilePath) {
         client_id: authData.client_id,
         refresh_token: refreshToken,
     });
+    // A refresh can rotate the refresh token upstream. Once sent, finish and save it
+    // even if the caller disconnects; the owning MCP server drains this task on close.
     const res = await sendHttpRequest({
         url: tokenEndpoint,
         method: 'POST',
@@ -304,7 +340,8 @@ async function performTokenRefreshUnderLock(authData, authFilePath) {
  * Get valid OAuth access token, refreshing preemptively if expiring within 120s.
  * Concurrency-safe: shares auth.json across multiple agent processes using proper-lockfile.
  */
-export async function getValidOAuthAccessToken() {
+export async function getValidOAuthAccessToken(signal) {
+    throwIfCancelled(signal);
     const config = loadConfig();
     const authFilePath = config.authFile;
     let authData = readAuthData(authFilePath);
@@ -317,8 +354,9 @@ export async function getValidOAuthAccessToken() {
         return authData.tokens.access_token;
     }
     ensureAuthFileExists(authFilePath);
-    const release = await lockfile.lock(authFilePath, LOCK_OPTIONS);
+    const release = await acquireAuthLock(authFilePath, signal);
     try {
+        throwIfCancelled(signal);
         authData = readAuthData(authFilePath);
         const updatedRemaining = (authData?.expires_at || 0) - Date.now();
         if (updatedRemaining > 120_000 && authData?.tokens?.access_token) {
@@ -327,7 +365,9 @@ export async function getValidOAuthAccessToken() {
         if (!authData) {
             throw new Error('Authentication data was deleted during token refresh.');
         }
-        return await performTokenRefreshUnderLock(authData, authFilePath);
+        const token = await performTokenRefreshUnderLock(authData, authFilePath);
+        throwIfCancelled(signal);
+        return token;
     }
     finally {
         await release();
@@ -337,12 +377,14 @@ export async function getValidOAuthAccessToken() {
  * Force refresh token on HTTP 401 error.
  * If another concurrent process has already rotated the token, the new token is reused.
  */
-export async function forceRefreshToken(rejectedAccessToken) {
+export async function forceRefreshToken(rejectedAccessToken, signal) {
+    throwIfCancelled(signal);
     const config = loadConfig();
     const authFilePath = config.authFile;
     ensureAuthFileExists(authFilePath);
-    const release = await lockfile.lock(authFilePath, LOCK_OPTIONS);
+    const release = await acquireAuthLock(authFilePath, signal);
     try {
+        throwIfCancelled(signal);
         const authData = readAuthData(authFilePath);
         if (!authData || !authData.tokens) {
             throw new Error('OAuth authentication file is missing or corrupted.');
@@ -350,7 +392,9 @@ export async function forceRefreshToken(rejectedAccessToken) {
         if (authData.tokens.access_token && authData.tokens.access_token !== rejectedAccessToken) {
             return authData.tokens.access_token;
         }
-        return await performTokenRefreshUnderLock(authData, authFilePath);
+        const token = await performTokenRefreshUnderLock(authData, authFilePath);
+        throwIfCancelled(signal);
+        return token;
     }
     finally {
         await release();

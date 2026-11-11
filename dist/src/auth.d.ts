@@ -24,12 +24,12 @@ export declare function loginWithDeviceCode(): Promise<void>;
  * Get valid OAuth access token, refreshing preemptively if expiring within 120s.
  * Concurrency-safe: shares auth.json across multiple agent processes using proper-lockfile.
  */
-export declare function getValidOAuthAccessToken(): Promise<string>;
+export declare function getValidOAuthAccessToken(signal?: AbortSignal): Promise<string>;
 /**
  * Force refresh token on HTTP 401 error.
  * If another concurrent process has already rotated the token, the new token is reused.
  */
-export declare function forceRefreshToken(rejectedAccessToken: string): Promise<string>;
+export declare function forceRefreshToken(rejectedAccessToken: string, signal?: AbortSignal): Promise<string>;
 /**
  * Retrieve auth status without probing quota or revealing secret tokens.
  */

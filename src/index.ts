@@ -5,4 +5,7 @@ export * from './auth.js';
 export * from './search.js';
 export * from './call-log.js';
 export * from './server.js';
+export * from './http-server.js';
+export * from './http-config.js';
+export * from './version.js';
 export * from './cli.js';

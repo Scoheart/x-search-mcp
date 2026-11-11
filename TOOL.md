@@ -10,13 +10,14 @@
 - **只读与安全性**：仅提供 `x_search` 检索工具，无发帖、点赞、关注或私信写操作；错误信息经由本地脱敏，不回显 upstream token/key。
 - **双认证模式**：支持按量付费 API Key 与 Grok 订阅 OAuth（设备码登录）；支持多进程并发共享令牌并带文件锁（`proper-lockfile`）。
 - **来源与降级感知**：提取结构化 citations 与正文 inline_citations。若上游无有效引用来源，自动标记 `degraded: true`。
+- **原生双传输**：默认 stdio；`http` / `--http` 使用官方 SDK 的无状态 Streamable HTTP，兼容 2026 与 2025 两代协议。
 
 ---
 
 ## 约束与边界说明（重要）
 
 1. **非官方项目**：本项目为独立开源 MCP 实现，并非 xAI 或 Nous Research / Hermes 官方 MCP。
-2. **仅本地 stdio 传输**：当前版本未开放远程 HTTP/SSE/WebSocket 监听入口，所有接入 Agent 通过启动子进程连接各自的 `stdio`。
+2. **传输与访问范围**：默认 stdio 供本机子进程接入；原生 HTTP 默认监听 `127.0.0.1:8000/mcp`，要求独立 Bearer 密钥。公网访问通过 HTTPS 反向代理配置，Host/Origin 使用显式白名单。HTTP 接口支持配置请求头的客户端；此版本不提供 OAuth 自动登录/发现服务。
 3. **公共 OAuth Client ID 说明**：默认内置的公开客户端 ID 来自 Hermes Agent（`b1a00492-073a-47ea-816f-4c329264a828`）。在浏览器授权确认页面中可能会显示该客户端标识名称。如需使用专属客户端，可通过 `XAI_OAUTH_CLIENT_ID` 环境变量配置。
 4. **OAuth 成功不等于搜索可用**：OAuth 设备码登录成功仅代表获得 xAI 账号凭证，实际搜索能力及并发额度由 xAI 云端及订阅权益决定；登录成功不保证账号一定具备 X Search 权限。
 5. **无引用不可作为确证**：当结果标记为 `has_citations: false` / `degraded: true` 时，表示上游未返回任何经过验证的 URL 引用，该回答不可作为来源充分的 X 检索事实依据。
@@ -28,6 +29,24 @@
 8. **过滤作用域限制**：xAI 接口的 `allowed_x_handles`、`excluded_x_handles`、`from_date` 和 `to_date` 过滤主要作用于关键词与语义搜索阶段，并不严格保证限制上游服务端内部的级联线程抓取（thread fetch）。
 
 ---
+
+## npm 安装与打包
+
+需要 Node.js 22.19.0 或更高版本。可以用 `npx` 直接运行。
+
+```bash
+npx --yes @scoheart/x-search-mcp@0.2.0 auth login
+npx --yes @scoheart/x-search-mcp@0.2.0 auth status
+```
+
+也可以在源码仓库运行 `npm ci` 和 `npm pack` 生成安装包。`prepack` 会先编译当前源码，安装端无需 TypeScript 或开发依赖。
+
+```bash
+npm install --global ./scoheart-x-search-mcp-0.2.0.tgz
+x-search-mcp auth status
+```
+
+包通过 `files` 白名单包含代码、示例和文档；OAuth 凭据和调用日志存放在用户配置目录，不随包分发。
 
 ## 凭证配置
 
@@ -77,6 +96,8 @@ x-search-mcp auth logout
 | 命令 | 说明 |
 |---|---|
 | `x-search-mcp` 或 `x-search-mcp --stdio` | 默认启动 MCP stdio 服务（供 Agent 客户端调用） |
+| `x-search-mcp http [options]` 或 `x-search-mcp --http [options]` | 启动原生 Streamable HTTP；必需独立访问密钥 |
+| `x-search-mcp --help` / `x-search-mcp http --help` | 查看命令与 HTTP 参数 |
 | `x-search-mcp auth login` | 发起 OAuth 设备码登录并在终端交互 |
 | `x-search-mcp auth status` | 安全输出当前认证模式、Key/OAuth 就绪状态 |
 | `x-search-mcp auth logout` | 在文件锁保护下安全删除本地 OAuth 凭据 |
@@ -107,6 +128,24 @@ x-search-mcp auth logout
 | `X_SEARCH_LOG_MAX_BYTES` | `8388608` | 单次原始响应写入上限；超出后截断并标记 |
 | `HTTP_PROXY` / `HTTPS_PROXY` | - | 标准 HTTP/HTTPS 代理配置 |
 
+### HTTP 服务配置
+
+| 变量名 | 默认值 | 说明 |
+|---|---|---|
+| `X_SEARCH_HTTP_TOKEN` | - | HTTP MCP 的独立 Bearer 密钥；不输出到日志 |
+| `X_SEARCH_HTTP_TOKEN_FILE` | - | 仅包含 HTTP 密钥的私有文件，启动时读取 |
+| `X_SEARCH_HTTP_HOST` | `127.0.0.1` | 监听地址；远端接入通常由本机 HTTPS 反代转发 |
+| `X_SEARCH_HTTP_PORT` | `8000` | TCP 端口；`0` 自动分配 |
+| `X_SEARCH_HTTP_PATH` | `/mcp` | 规范化 URL 路径，不含查询参数或片段 |
+| `X_SEARCH_HTTP_ALLOWED_HOSTS` | - | 额外允许的 Host 主机名，逗号分隔，不含协议或端口 |
+| `X_SEARCH_HTTP_ALLOWED_ORIGINS` | - | 明确允许的浏览器 Origin，逗号分隔，匹配协议、主机和端口 |
+
+同名 CLI 参数覆盖环境默认值。`--allowed-host` 与 `--allowed-origin` 可重复；提供这类参数时使用命令行列表。显式 `--token-file` 优先，否则非空 `X_SEARCH_HTTP_TOKEN` 优先于环境 token 文件。空密钥、非法路径、非法端口或不可读文件会阻止启动。
+
+HTTP 请求体默认上限为 1 MiB。`SIGINT`/`SIGTERM` 停止服务并取消活动请求；上游超时和客户端取消持续覆盖响应体读取阶段。
+
+退出会取消尚在等待 OAuth 文件锁的请求。已经发出的刷新请求可能轮换 refresh token，因此服务会等待它完成原子保存，再完成退出；该阶段受独立的 30 秒刷新超时约束。取消后不会继续发起搜索。
+
 ---
 
 ## 调用日志
@@ -124,6 +163,22 @@ x-search-mcp auth logout
 
 ## Agent 接入配置
 
+### 原生 HTTP
+
+源码构建后执行：
+
+```bash
+export X_SEARCH_AUTH_MODE=oauth
+export X_SEARCH_HTTP_TOKEN="$(openssl rand -hex 32)"
+node bin/x-search-mcp.js http --port 8000
+```
+
+安装版 0.2.0 可直接使用 `x-search-mcp http`。客户端选择 **Streamable HTTP**，填写 `http://127.0.0.1:8000/mcp`，请求头设为 `Authorization: Bearer <X_SEARCH_HTTP_TOKEN 的值>`。未带正确密钥返回 401；不允许的 Host/Origin 返回 403。
+
+服务使用同一份本机 Grok 凭证和调用日志；MCP 无状态表示不保存连接会话，不会清除 OAuth 登录。新旧协议都由同一个工具工厂处理，不需要网关子进程。
+
+若经域名代理，配置 `--allowed-host mcp.example.com`，让客户端连接 `https://mcp.example.com/mcp`。浏览器跨站调用还需显式 `--allowed-origin https://app.example.com`；非浏览器客户端可以不发送 Origin。HTTP 密钥与 Grok 凭证、npm 发布 token 分开管理。
+
 ### 1. 通用 mcpServers JSON（Claude Desktop / Cline / Cursor 等）
 
 在目标 Agent 的配置文件中添加：
@@ -132,8 +187,8 @@ x-search-mcp auth logout
 {
   "mcpServers": {
     "x-search": {
-      "command": "node",
-      "args": ["/Users/scoheart/Code/scoheart/x-search-mcp/bin/x-search-mcp.js"],
+      "command": "npx",
+      "args": ["--yes", "@scoheart/x-search-mcp@0.2.0"],
       "env": {
         "X_SEARCH_AUTH_MODE": "auto",
         "X_SEARCH_MODEL": "grok-4.5"
@@ -144,17 +199,17 @@ x-search-mcp auth logout
 }
 ```
 
-> **提示**：可直接运行 `x-search-mcp config` 生成当前环境下绝对路径的 JSON 模板。修改配置后请重启或重新加载 Agent 会话。
+> 若安装的是本地 tarball，可改用 `"command": "x-search-mcp"`、`"args": []`，并确保客户端的 `PATH` 包含安装目录。也可以运行 `x-search-mcp config` 生成当前可执行入口的绝对路径配置。修改配置后请重启或重新加载 Agent 会话。Pi 使用 `--no-mcp` 启动时不会连接 MCP 服务。
 
-### 2. Codex 配置 (`codex.toml`)
+### 2. Codex 配置 (`~/.codex/config.toml`)
 
 ```toml
-[mcp.servers.x-search]
-command = "node"
-args = ["/Users/scoheart/Code/scoheart/x-search-mcp/bin/x-search-mcp.js"]
-timeout = 600
+[mcp_servers.x-search]
+command = "npx"
+args = ["--yes", "@scoheart/x-search-mcp@0.2.0"]
+tool_timeout_sec = 600
 
-[mcp.servers.x-search.env]
+[mcp_servers.x-search.env]
 X_SEARCH_AUTH_MODE = "auto"
 X_SEARCH_MODEL = "grok-4.5"
 ```

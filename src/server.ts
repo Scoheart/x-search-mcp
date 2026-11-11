@@ -1,12 +1,9 @@
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { executeSearch } from './search.js';
-
-export const server = new McpServer({
-  name: 'x-search-mcp',
-  version: '0.1.0',
-});
+import type { XSearchInput } from './types.js';
+import { version } from './version.js';
 
 const searchInputSchema = {
   query: z
@@ -55,9 +52,9 @@ const toolDefinition = {
   },
 };
 
-const toolHandler = async (params: any, extra: any) => {
+const toolHandler = async (params: XSearchInput, context: ServerContext) => {
   try {
-    const signal = extra?.signal as AbortSignal | undefined;
+    const signal = context.mcpReq.signal;
     const result = await executeSearch(params, { signal });
     return {
       content: [
@@ -66,7 +63,7 @@ const toolHandler = async (params: any, extra: any) => {
           text: JSON.stringify(result, null, 2),
         },
       ],
-      structuredContent: result,
+      structuredContent: { ...result },
     };
   } catch (err: any) {
     const errorPayload = {
@@ -94,17 +91,33 @@ const toolHandler = async (params: any, extra: any) => {
   }
 };
 
-if (typeof (server as any).registerTool === 'function') {
-  (server as any).registerTool('x_search', toolDefinition, toolHandler);
-} else if (typeof (server as any).tool === 'function') {
-  (server as any).tool(
-    'x_search',
-    toolDefinition.description,
-    toolDefinition.inputSchema,
-    toolDefinition.annotations,
-    toolHandler
-  );
+export function createServer(): McpServer {
+  const instance = new McpServer({ name: 'x-search-mcp', version });
+  const active = new Set<ReturnType<typeof toolHandler>>();
+  let closing: Promise<void> | undefined;
+  instance.registerTool('x_search', toolDefinition, (params, context) => {
+    if (closing) throw new Error('MCP server is closing');
+    const task = toolHandler(params, context);
+    active.add(task);
+    void task.then(() => { active.delete(task); }, () => { active.delete(task); });
+    return task;
+  });
+  // The modern SDK closes the underlying Server directly; legacy code closes
+  // McpServer. Owning the underlying close covers both entry points.
+  const closeTransport = instance.server.close.bind(instance.server);
+  instance.server.close = () => {
+    closing ??= Promise.resolve().then(async () => {
+      await closeTransport();
+      // Cancel queued/search work, but finish any already accepted credential rotation.
+      await Promise.allSettled([...active]);
+    });
+    return closing;
+  };
+  return instance;
 }
+
+/** @deprecated Create a fresh server with createServer() for each transport. */
+export const server = createServer();
 
 /**
  * Launch stdio server.
@@ -112,5 +125,5 @@ if (typeof (server as any).registerTool === 'function') {
  * Diagnostic logs are written to stderr.
  */
 export function startStdio() {
-  return serveStdio(() => server);
+  return serveStdio(createServer);
 }

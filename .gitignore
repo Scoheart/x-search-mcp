@@ -4,6 +4,7 @@ node_modules/
 *.log
 logs/
 *.tmp
+*.tgz
 .DS_Store
 .config/
 auth.json

@@ -1,4 +1,5 @@
 import { request, EnvHttpProxyAgent } from 'undici';
+import { version } from './version.js';
 // Global HTTP proxy agent reading standard environment variables: HTTP_PROXY, HTTPS_PROXY, NO_PROXY
 const proxyAgent = new EnvHttpProxyAgent();
 export class HttpError extends Error {
@@ -67,19 +68,22 @@ export async function sendHttpRequest({ url, method = 'GET', headers = {}, body 
         };
         signal?.addEventListener('abort', abortHandler, { once: true });
         let response;
+        let responseText = '';
         let timedOut = false;
         let cancelled = false;
         try {
             response = await request(url, {
                 method: method,
                 headers: {
-                    'User-Agent': 'x-search-mcp/0.1.0',
+                    'User-Agent': `x-search-mcp/${version}`,
                     ...headers,
                 },
                 body: body,
                 dispatcher: proxyAgent,
                 signal: timeoutController.signal,
             });
+            // Keep the deadline and client cancellation attached through body consumption.
+            responseText = await response.body.text();
         }
         catch (err) {
             if (signal?.aborted || err?.message === 'CANCELLED') {
@@ -113,17 +117,9 @@ export async function sendHttpRequest({ url, method = 'GET', headers = {}, body 
         // Retry on 5xx errors if remaining retries
         if (status >= 500 && status < 600 && attempt < maxRetries) {
             attempt++;
-            await response.body.dump();
             const backoffMs = Math.min(1500 * attempt, 5000);
             await sleep(backoffMs, signal);
             continue;
-        }
-        let responseText = '';
-        try {
-            responseText = await response.body.text();
-        }
-        catch (readErr) {
-            throw new HttpError('NETWORK_ERROR', `Failed reading response body: ${readErr.message}`);
         }
         let parsedData = null;
         const contentType = response.headers['content-type'] || '';
@@ -136,7 +132,7 @@ export async function sendHttpRequest({ url, method = 'GET', headers = {}, body 
             }
         }
         if (status >= 400) {
-            throw createSanitizedHttpError(status, parsedData);
+            throw createSanitizedHttpError(status, parsedData ?? responseText);
         }
         return {
             status,

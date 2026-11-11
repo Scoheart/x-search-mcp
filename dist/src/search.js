@@ -242,7 +242,7 @@ export async function executeSearch(rawParams, { signal } = {}) {
             billingMode = 'api_metered';
         }
         else if (effectiveAuthMode === 'oauth') {
-            token = await getValidOAuthAccessToken();
+            token = await getValidOAuthAccessToken(signal);
             credentialSource = 'oauth';
             billingMode = 'subscription_oauth';
         }
@@ -255,11 +255,13 @@ export async function executeSearch(rawParams, { signal } = {}) {
             }
             else {
                 try {
-                    token = await getValidOAuthAccessToken();
+                    token = await getValidOAuthAccessToken(signal);
                     credentialSource = 'oauth';
                     billingMode = 'subscription_oauth';
                 }
-                catch {
+                catch (error) {
+                    if (error instanceof HttpError && error.code === 'cancelled')
+                        throw error;
                     throw new Error('Credential error: No valid credentials found. Provide XAI_API_KEY or authenticate via "x-search-mcp auth login".');
                 }
             }
@@ -317,7 +319,7 @@ export async function executeSearch(rawParams, { signal } = {}) {
             attempts.push(attemptFromError(err));
             // If OAuth returns HTTP 401, force-refresh token once and retry once
             if (credentialSource === 'oauth' && err instanceof HttpError && err.status === 401) {
-                const freshToken = await forceRefreshToken(token);
+                const freshToken = await forceRefreshToken(token, signal);
                 try {
                     httpRes = await sendHttpRequest({
                         url: XAI_RESPONSES_URL,
