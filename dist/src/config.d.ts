@@ -4,5 +4,7 @@ import type { Config } from './types.js';
  * Direct XAI_API_KEY has precedence over XAI_API_KEY_FILE.
  */
 export declare function getApiKey(): string | null;
-export declare function loadConfig(): Config;
+export declare function loadConfig({ managed }?: {
+    managed?: boolean;
+}): Config;
 //# sourceMappingURL=config.d.ts.map

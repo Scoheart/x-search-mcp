@@ -1,12 +1,20 @@
-import { type McpServerFactory } from '@modelcontextprotocol/server';
+import { type IncomingMessage, type ServerResponse } from 'node:http';
+import { type AuthInfo, type McpServerFactory } from '@modelcontextprotocol/server';
 export interface HttpServerOptions {
-    token: string;
+    token?: string;
+    authentication?: HttpAuthentication;
     host?: string;
     port?: number;
     path?: string;
     allowedHosts?: string[];
     allowedOrigins?: string[];
     maxRequestBodyBytes?: number;
+}
+export interface HttpAuthentication {
+    resourceMetadataUrl: string;
+    scope: string;
+    verify(token: string): Promise<AuthInfo | 'insufficient_scope' | 'forbidden' | null>;
+    route?(path: string, request: IncomingMessage, response: ServerResponse): Promise<boolean>;
 }
 export interface RunningHttpServer {
     url: string;

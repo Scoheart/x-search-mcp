@@ -79,7 +79,7 @@ function parseReasoningEffort(val: string | undefined): ReasoningEffort | undefi
   return effort;
 }
 
-export function loadConfig(): Config {
+export function loadConfig({ managed = false }: { managed?: boolean } = {}): Config {
   const defaultAuthDir = path.join(os.homedir(), '.config', 'x-search-mcp');
   const defaultAuthFile = path.join(defaultAuthDir, 'auth.json');
   const authFile = process.env.X_SEARCH_AUTH_FILE
@@ -87,7 +87,7 @@ export function loadConfig(): Config {
     : defaultAuthFile;
 
   return {
-    authMode: parseAuthMode(process.env.X_SEARCH_AUTH_MODE),
+    authMode: managed ? 'api_key' : parseAuthMode(process.env.X_SEARCH_AUTH_MODE),
     authFile,
     authDir: path.dirname(authFile),
     oauthClientId: process.env.XAI_OAUTH_CLIENT_ID || 'b1a00492-073a-47ea-816f-4c329264a828',
@@ -96,8 +96,8 @@ export function loadConfig(): Config {
     retries: parseBoundedInt(process.env.X_SEARCH_RETRIES, 'X_SEARCH_RETRIES', 0, 3, 2),
     maxTurns: parseBoundedInt(process.env.X_SEARCH_MAX_TURNS, 'X_SEARCH_MAX_TURNS', 1, 20, 4),
     reasoningEffort: parseReasoningEffort(process.env.X_SEARCH_REASONING_EFFORT),
-    apiKey: getApiKey(),
-    logEnabled: parseEnabled(process.env.X_SEARCH_LOG, 'X_SEARCH_LOG', true),
+    apiKey: managed ? null : getApiKey(),
+    logEnabled: !managed && parseEnabled(process.env.X_SEARCH_LOG, 'X_SEARCH_LOG', true),
     logDir: process.env.X_SEARCH_LOG_DIR
       ? path.resolve(process.env.X_SEARCH_LOG_DIR)
       : path.join(defaultAuthDir, 'logs'),

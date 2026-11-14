@@ -9,4 +9,7 @@ export * from './http-server.js';
 export * from './http-config.js';
 export * from './version.js';
 export * from './cli.js';
+export * from './multi-user/bindings.js';
+export * from './multi-user/keys.js';
+export * from './multi-user/service.js';
 //# sourceMappingURL=index.js.map

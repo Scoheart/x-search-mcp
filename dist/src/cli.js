@@ -19,18 +19,23 @@ HTTP options:
   --host <address>          Bind address (default: 127.0.0.1)
   --port <number>           TCP port (default: 8000; 0 chooses an available port)
   --path <path>             MCP endpoint (default: /mcp)
-  --token-file <file>       Private file containing the HTTP bearer token
-  --allowed-host <hostname> Allow an additional Host hostname; repeatable, no ports
+  --token-file <file>       Private file containing the single-account HTTP bearer token
+  --allowed-host <hostname> Allow an additional single-account Host hostname; repeatable, no ports
   --allowed-origin <url>    Allow an exact browser origin; repeatable
+  --multi-user              Require per-user OAuth and encrypted xAI API key bindings
+  --dev-local-key           Use a local wrapping key for multi-user development
 
 HTTP credentials: X_SEARCH_HTTP_TOKEN or X_SEARCH_HTTP_TOKEN_FILE.
 Other HTTP environment defaults: X_SEARCH_HTTP_HOST, X_SEARCH_HTTP_PORT,
 X_SEARCH_HTTP_PATH, X_SEARCH_HTTP_ALLOWED_HOSTS, X_SEARCH_HTTP_ALLOWED_ORIGINS.
-Grok credentials remain server-side; HTTP access uses its own bearer token.`);
+Multi-user settings use X_SEARCH_MULTI_USER_*; see docs/multi-user.md.`);
         return;
     }
     if (command === 'http' || command === '--http') {
-        const service = await startHttp(createServer, loadHttpOptions(argv.slice(1)));
+        const args = argv.slice(1);
+        const service = args.includes('--multi-user')
+            ? await (await import('./multi-user/cli.js')).startMultiUserCli(args.filter(argument => argument !== '--multi-user'))
+            : await startHttp(createServer, loadHttpOptions(args));
         const stop = () => {
             void service.close().catch(() => {
                 console.error('Could not shut down the HTTP MCP service cleanly');

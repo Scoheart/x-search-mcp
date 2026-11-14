@@ -19,6 +19,7 @@ export declare function validateAndNormalizeHandles(handles: any[], fieldName: s
 export declare function validateSearchParams(params: Record<string, any>): XSearchInput;
 export interface ExecuteSearchOptions {
     signal?: AbortSignal;
+    resolveApiKey?: () => Promise<string>;
 }
-export declare function executeSearch(rawParams: Record<string, any>, { signal }?: ExecuteSearchOptions): Promise<XSearchResult>;
+export declare function executeSearch(rawParams: Record<string, any>, { signal, resolveApiKey }?: ExecuteSearchOptions): Promise<XSearchResult>;
 //# sourceMappingURL=search.d.ts.map

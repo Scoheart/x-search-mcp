@@ -191,7 +191,7 @@ function attemptFromError(err) {
         error: errorInfo(err),
     };
 }
-export async function executeSearch(rawParams, { signal } = {}) {
+export async function executeSearch(rawParams, { signal, resolveApiKey } = {}) {
     const startedAt = new Date().toISOString();
     const startedMs = Date.now();
     const attempts = [];
@@ -201,6 +201,8 @@ export async function executeSearch(rawParams, { signal } = {}) {
     let model = '';
     let query = typeof rawParams?.query === 'string' ? rawParams.query : '';
     const persist = async (outcome, error) => {
+        if (resolveApiKey)
+            return null;
         try {
             const logFile = await writeCallLog({
                 started_at: startedAt,
@@ -228,12 +230,19 @@ export async function executeSearch(rawParams, { signal } = {}) {
         // Step 1: Strict parameter validation BEFORE credentials and network
         const validated = validateSearchParams(rawParams);
         query = validated.query;
-        const config = loadConfig();
+        const config = loadConfig({ managed: Boolean(resolveApiKey) });
         model = config.model;
         // Step 2: Credential resolution
         const effectiveAuthMode = validated.auth_mode || config.authMode;
         let token;
-        if (effectiveAuthMode === 'api_key') {
+        if (resolveApiKey) {
+            token = await resolveApiKey();
+            if (!token)
+                throw new HttpError('XAI_KEY_REQUIRED', 'Bind your xAI API key in Settings.', 409);
+            credentialSource = 'api_key';
+            billingMode = 'api_metered';
+        }
+        else if (effectiveAuthMode === 'api_key') {
             if (!config.apiKey) {
                 throw new Error('Credential error: API key is required when auth_mode is "api_key", but neither XAI_API_KEY nor XAI_API_KEY_FILE was provided.');
             }
@@ -312,7 +321,8 @@ export async function executeSearch(rawParams, { signal } = {}) {
                 body: JSON.stringify(requestBody),
                 signal,
                 timeoutSeconds: config.timeoutSeconds,
-                retries: config.retries,
+                // Managed requests must not retry an old key after it has been unbound.
+                retries: resolveApiKey ? 0 : config.retries,
             });
         }
         catch (err) {
@@ -359,7 +369,7 @@ export async function executeSearch(rawParams, { signal } = {}) {
         attempts.push({ http_status: httpRes.status ?? null, raw_response: rawData, error: null });
         // Check for upstream error status
         if (rawData.status === 'failed' || rawData.error) {
-            const errMsg = rawData.error?.message || 'Upstream xAI response status is failed';
+            const errMsg = (!resolveApiKey && rawData.error?.message) || 'Upstream xAI response status is failed';
             const upstreamError = new HttpError('UPSTREAM_SERVER_ERROR', errMsg, httpRes.status);
             attempts[attempts.length - 1].error = errorInfo(upstreamError);
             throw upstreamError;

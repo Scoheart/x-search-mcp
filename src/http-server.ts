@@ -1,17 +1,25 @@
 import { timingSafeEqual } from 'node:crypto';
-import { createServer as createNodeServer, type ServerResponse } from 'node:http';
+import { createServer as createNodeServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
-import { createMcpHandler, McpServer, type McpServerFactory } from '@modelcontextprotocol/server';
+import { createMcpHandler, McpServer, type AuthInfo, type McpServerFactory } from '@modelcontextprotocol/server';
 import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 
 export interface HttpServerOptions {
-  token: string;
+  token?: string;
+  authentication?: HttpAuthentication;
   host?: string;
   port?: number;
   path?: string;
   allowedHosts?: string[];
   allowedOrigins?: string[];
   maxRequestBodyBytes?: number;
+}
+
+export interface HttpAuthentication {
+  resourceMetadataUrl: string;
+  scope: string;
+  verify(token: string): Promise<AuthInfo | 'insufficient_scope' | 'forbidden' | null>;
+  route?(path: string, request: IncomingMessage, response: ServerResponse): Promise<boolean>;
 }
 
 export interface RunningHttpServer {
@@ -54,7 +62,11 @@ function json(response: ServerResponse, status: number, message: string): void {
 
 /** Owns one listener and the SDK's stateless per-request handler. */
 export async function startHttp(factory: McpServerFactory, options: HttpServerOptions): Promise<RunningHttpServer> {
-  if (typeof options.token !== 'string' || !options.token.trim() || /\s/.test(options.token)) {
+  const authentication = options.authentication;
+  if (authentication && options.token !== undefined) {
+    throw new Error('Select one HTTP authentication mode');
+  }
+  if (!authentication && (typeof options.token !== 'string' || !options.token.trim() || /\s/.test(options.token))) {
     throw new Error('A non-empty HTTP bearer token without whitespace is required');
   }
   const host = options.host ?? '127.0.0.1';
@@ -71,7 +83,7 @@ export async function startHttp(factory: McpServerFactory, options: HttpServerOp
   const allowedOrigins = (options.allowedOrigins ?? []).map(normalizeAllowedOrigin);
   const validateHost = hostHeaderValidation(allowedHosts);
   const validateOrigin = originValidation(allowedOrigins.length ? allowedOrigins.map(value => new URL(value).hostname) : loopback);
-  const expectedToken = Buffer.from(options.token);
+  const expectedToken = Buffer.from(options.token ?? '');
   type Product = Awaited<ReturnType<McpServerFactory>>;
   const products = new Set<Product>();
   const creating = new Set<Promise<Product>>();
@@ -99,8 +111,9 @@ export async function startHttp(factory: McpServerFactory, options: HttpServerOp
   };
   const handler = createMcpHandler(ownedFactory, { legacy: 'stateless', maxRequestBodySize: maxBody });
   const nodeHandler = toNodeHandler(handler, { maxRequestBodySize: maxBody });
+  const requests = new Set<Promise<void>>();
 
-  const listener = createNodeServer((request, response) => {
+  async function handleRequest(request: IncomingMessage & { auth?: AuthInfo }, response: ServerResponse) {
     if (!validateHost(request, response) || !validateOrigin(request, response)) return;
     const origin = request.headers.origin;
     if (origin && allowedOrigins.length && !allowedOrigins.includes(origin)) {
@@ -112,14 +125,14 @@ export async function startHttp(factory: McpServerFactory, options: HttpServerOp
       json(response, 400, 'Invalid request URL');
       return;
     }
-    if (pathname !== endpointPath) {
-      json(response, 404, 'Not found');
-      return;
-    }
     if (origin && allowedOrigins.includes(origin)) {
       response.setHeader('Access-Control-Allow-Origin', origin);
       response.setHeader('Vary', 'Origin');
-      response.setHeader('Access-Control-Expose-Headers', 'MCP-Protocol-Version, MCP-Session-Id');
+      response.setHeader('Access-Control-Expose-Headers', 'MCP-Protocol-Version, MCP-Session-Id, WWW-Authenticate');
+    }
+    if (pathname !== endpointPath) {
+      if (!await authentication?.route?.(pathname, request, response)) json(response, 404, 'Not found');
+      return;
     }
     if (request.method === 'OPTIONS' && origin && allowedOrigins.includes(origin)) {
       if (request.headers['access-control-request-method'] !== 'POST') {
@@ -144,18 +157,41 @@ export async function startHttp(factory: McpServerFactory, options: HttpServerOp
       return;
     }
     const authorization = request.headers.authorization;
-    const supplied = typeof authorization === 'string' ? /^Bearer\s+(\S+)$/i.exec(authorization)?.[1] : undefined;
-    const candidate = Buffer.from(supplied ?? '');
-    if (candidate.length !== expectedToken.length || !timingSafeEqual(candidate, expectedToken)) {
-      response.setHeader('WWW-Authenticate', 'Bearer realm="x-search-mcp"');
-      json(response, 401, 'Valid MCP bearer credentials are required');
-      return;
+    const supplied = typeof authorization === 'string' && request.headersDistinct.authorization?.length === 1
+      ? /^Bearer\s+(\S+)$/i.exec(authorization)?.[1] : undefined;
+    if (authentication) {
+      const verdict = supplied ? await authentication.verify(supplied) : null;
+      if (response.destroyed || stopping) return;
+      if (verdict === 'forbidden') {
+        json(response, 403, 'This user is not invited to use this service');
+        return;
+      }
+      if (verdict === null || verdict === 'insufficient_scope') {
+        const error = verdict === 'insufficient_scope' ? ', error="insufficient_scope"' : supplied ? ', error="invalid_token"' : '';
+        response.setHeader('WWW-Authenticate', `Bearer resource_metadata="${authentication.resourceMetadataUrl}", scope="${authentication.scope}"${error}`);
+        json(response, verdict === 'insufficient_scope' ? 403 : 401, 'Valid MCP bearer credentials are required');
+        return;
+      }
+      request.auth = verdict;
+    } else {
+      const candidate = Buffer.from(supplied ?? '');
+      if (candidate.length !== expectedToken.length || !timingSafeEqual(candidate, expectedToken)) {
+        response.setHeader('WWW-Authenticate', 'Bearer realm="x-search-mcp"');
+        json(response, 401, 'Valid MCP bearer credentials are required');
+        return;
+      }
     }
-    void nodeHandler(request, response).catch(() => {
+    await nodeHandler(request, response);
+  }
+
+  const listener = createNodeServer((request, response) => {
+    const task = handleRequest(request, response).catch(() => {
       if (response.destroyed) return;
       if (response.headersSent) response.destroy();
       else json(response, 500, 'MCP HTTP request failed');
     });
+    requests.add(task);
+    void task.then(() => { requests.delete(task); });
   });
 
   try {
@@ -181,6 +217,7 @@ export async function startHttp(factory: McpServerFactory, options: HttpServerOp
         // The SDK's legacy leg starts per-request teardown without awaiting it.
         // Drain every owned product as well as the modern handler's exchanges.
         await Promise.all([handler.close(), ...[...products].map(product => product.close()), stopped]);
+        await Promise.allSettled([...requests]);
       })();
       return closing;
     },

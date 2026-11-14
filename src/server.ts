@@ -35,14 +35,10 @@ const searchInputSchema = {
     .boolean()
     .optional()
     .describe('Enable video understanding for video-containing posts'),
-  auth_mode: z
-    .enum(['auto', 'api_key', 'oauth'])
-    .optional()
-    .describe('Credential selection mode: auto, api_key, or oauth'),
 };
 
 const toolDefinition = {
-  description: 'Search X (formerly Twitter) using xAI responses API with real-time index, account filters, and date ranges. Each call saves a local log of the raw upstream response; the path is returned as log_file.',
+  description: 'Search X (formerly Twitter) using the xAI Responses API with account filters and date ranges.',
   inputSchema: searchInputSchema,
   annotations: {
     readOnlyHint: true,
@@ -52,10 +48,11 @@ const toolDefinition = {
   },
 };
 
-const toolHandler = async (params: XSearchInput, context: ServerContext) => {
+type SearchHandler = (params: XSearchInput, context: ServerContext) => ReturnType<typeof executeSearch>;
+
+const toolHandler = async (search: SearchHandler, params: XSearchInput, context: ServerContext, settingsUrl?: string) => {
   try {
-    const signal = context.mcpReq.signal;
-    const result = await executeSearch(params, { signal });
+    const result = await search(params, context);
     return {
       content: [
         {
@@ -71,6 +68,8 @@ const toolHandler = async (params: XSearchInput, context: ServerContext) => {
       provider: 'xai',
       tool: 'x_search',
       log_file: err.logFile || null,
+      ...(settingsUrl && (err.code === 'XAI_KEY_REQUIRED' || err.code === 'UPSTREAM_AUTH_ERROR')
+        ? { settings_url: settingsUrl } : {}),
       error: {
         code: err.code || 'SEARCH_ERROR',
         message: err.message || 'Search execution failed',
@@ -92,12 +91,25 @@ const toolHandler = async (params: XSearchInput, context: ServerContext) => {
 };
 
 export function createServer(): McpServer {
+  return createSearchServer((params, context) => executeSearch(params, { signal: context.mcpReq.signal }));
+}
+
+export function createSearchServer(search: SearchHandler, settingsUrl?: string): McpServer {
   const instance = new McpServer({ name: 'x-search-mcp', version });
   const active = new Set<ReturnType<typeof toolHandler>>();
   let closing: Promise<void> | undefined;
-  instance.registerTool('x_search', toolDefinition, (params, context) => {
+  const definition = settingsUrl ? toolDefinition : {
+    ...toolDefinition,
+    description: 'Search X (formerly Twitter) using xAI responses API with real-time index, account filters, and date ranges. Each call saves a local log of the raw upstream response; the path is returned as log_file.',
+    inputSchema: {
+      ...searchInputSchema,
+      auth_mode: z.enum(['auto', 'api_key', 'oauth']).optional()
+        .describe('Credential selection mode: auto, api_key, or oauth'),
+    },
+  };
+  instance.registerTool('x_search', definition, (params, context) => {
     if (closing) throw new Error('MCP server is closing');
-    const task = toolHandler(params, context);
+    const task = toolHandler(search, params, context, settingsUrl);
     active.add(task);
     void task.then(() => { active.delete(task); }, () => { active.delete(task); });
     return task;

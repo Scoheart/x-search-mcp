@@ -1,6 +1,6 @@
 {
     "name": "@scoheart/x-search-mcp",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "Independent MCP service for x_search, inspired by Hermes Agent",
     "repository": {
         "type": "git",
@@ -31,6 +31,7 @@
         "LICENSE",
         "THIRD_PARTY_NOTICES.md",
         "examples",
+        "docs/multi-user.md",
         ".env.example",
         "README.md",
         "tsconfig.json"
@@ -48,8 +49,13 @@
         "access": "public"
     },
     "dependencies": {
+        "@alicloud/credentials": "2.4.7",
+        "@alicloud/kms20160120": "3.3.2",
+        "@alicloud/openapi-core": "1.0.9",
         "@modelcontextprotocol/node": "2.1.2",
         "@modelcontextprotocol/server": "2.4.0",
+        "jose": "6.2.17",
+        "openid-client": "6.8.9",
         "proper-lockfile": "4.1.2",
         "undici": "8.12.4",
         "zod": "4.6.7"
