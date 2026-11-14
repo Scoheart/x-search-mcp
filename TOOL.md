@@ -17,7 +17,7 @@
 ## 约束与边界说明（重要）
 
 1. **非官方项目**：本项目为独立开源 MCP 实现，并非 xAI 或 Nous Research / Hermes 官方 MCP。
-2. **传输与访问范围**：默认 stdio 供本机子进程接入；原生 HTTP 默认监听 `127.0.0.1:8000/mcp`，要求独立 Bearer 密钥。公网访问通过 HTTPS 反向代理配置，Host/Origin 使用显式白名单。HTTP 接口支持配置请求头的客户端；此版本不提供 OAuth 自动登录/发现服务。
+2. **传输与访问范围**。默认 stdio 供本机子进程接入。单账号 HTTP 默认监听 `127.0.0.1:8000/mcp`，客户端使用独立 Bearer 密钥。多人 HTTP 通过身份服务进行 MCP OAuth 登录，每人绑定自己的 xAI API Key。公网接入通过 HTTPS 反向代理配置。 [多人部署说明](./docs/multi-user.md)
 3. **公共 OAuth Client ID 说明**：默认内置的公开客户端 ID 来自 Hermes Agent（`b1a00492-073a-47ea-816f-4c329264a828`）。在浏览器授权确认页面中可能会显示该客户端标识名称。如需使用专属客户端，可通过 `XAI_OAUTH_CLIENT_ID` 环境变量配置。
 4. **OAuth 成功不等于搜索可用**：OAuth 设备码登录成功仅代表获得 xAI 账号凭证，实际搜索能力及并发额度由 xAI 云端及订阅权益决定；登录成功不保证账号一定具备 X Search 权限。
 5. **无引用不可作为确证**：当结果标记为 `has_citations: false` / `degraded: true` 时，表示上游未返回任何经过验证的 URL 引用，该回答不可作为来源充分的 X 检索事实依据。
@@ -25,7 +25,7 @@
    - API Key 模式下按调用量付费（api_metered）。
    - 显式 `oauth` 模式下仅使用订阅令牌，**绝不回退**到付费 API Key，避免产生非预期账单。
    - `auto` 模式优先使用 API Key（如果配置），无 Key 时使用本地保存的 OAuth。
-7. **重试消耗**：网络波动或 5xx 错误时会执行有限次数退避重试，重试请求可能重复消耗上游额度。
+7. **重试消耗**。stdio 和单账号 HTTP 遇到网络波动或 5xx 错误时可执行有限次数退避重试，可能重复消耗上游额度。多人 HTTP 每次搜索只发起一次上游请求。
 8. **过滤作用域限制**：xAI 接口的 `allowed_x_handles`、`excluded_x_handles`、`from_date` 和 `to_date` 过滤主要作用于关键词与语义搜索阶段，并不严格保证限制上游服务端内部的级联线程抓取（thread fetch）。
 
 ---
@@ -35,14 +35,14 @@
 需要 Node.js 22.19.0 或更高版本。可以用 `npx` 直接运行。
 
 ```bash
-npx --yes @scoheart/x-search-mcp@0.2.0 auth login
-npx --yes @scoheart/x-search-mcp@0.2.0 auth status
+npx --yes @scoheart/x-search-mcp@0.3.0 auth login
+npx --yes @scoheart/x-search-mcp@0.3.0 auth status
 ```
 
 也可以在源码仓库运行 `npm ci` 和 `npm pack` 生成安装包。`prepack` 会先编译当前源码，安装端无需 TypeScript 或开发依赖。
 
 ```bash
-npm install --global ./scoheart-x-search-mcp-0.2.0.tgz
+npm install --global ./scoheart-x-search-mcp-0.3.0.tgz
 x-search-mcp auth status
 ```
 
@@ -96,7 +96,8 @@ x-search-mcp auth logout
 | 命令 | 说明 |
 |---|---|
 | `x-search-mcp` 或 `x-search-mcp --stdio` | 默认启动 MCP stdio 服务（供 Agent 客户端调用） |
-| `x-search-mcp http [options]` 或 `x-search-mcp --http [options]` | 启动原生 Streamable HTTP；必需独立访问密钥 |
+| `x-search-mcp http [options]` 或 `x-search-mcp --http [options]` | 启动单账号 Streamable HTTP，使用独立访问密钥 |
+| `x-search-mcp http --multi-user` | 启动受邀多用户模式，各自绑定 xAI API Key，配置见 [多人部署说明](./docs/multi-user.md) |
 | `x-search-mcp --help` / `x-search-mcp http --help` | 查看命令与 HTTP 参数 |
 | `x-search-mcp auth login` | 发起 OAuth 设备码登录并在终端交互 |
 | `x-search-mcp auth status` | 安全输出当前认证模式、Key/OAuth 就绪状态 |
@@ -118,11 +119,11 @@ x-search-mcp auth logout
 | `XAI_OAUTH_CLIENT_ID` | `b1a00492-073a-47ea-816f-4c329264a828` | OAuth 公开客户端 ID |
 | `X_SEARCH_MODEL` | `grok-4.5` | 搜索调用模型 |
 | `X_SEARCH_TIMEOUT_SECONDS` | `180` | 请求超时时间（秒，范围 5–600） |
-| `X_SEARCH_RETRIES` | `2` | 失败重试次数（网络/5xx，范围 0–3） |
+| `X_SEARCH_RETRIES` | `2` | stdio 和单账号 HTTP 的失败重试次数（网络/5xx，范围 0–3） |
 | `X_SEARCH_MAX_TURNS` | `4` | 内部搜索轮数（范围 1–20） |
 | `X_SEARCH_REASONING_EFFORT`| - | 思考深度：`low` / `medium` / `high` / `xhigh` |
 | `X_SEARCH_ENV_FILE` | - | 显式指定 `.env` 文件（通过 `process.loadEnvFile` 加载） |
-| `X_SEARCH_LOG` | `on` | 是否保存调用日志：`on` / `off` |
+| `X_SEARCH_LOG` | `on` | stdio 和单账号 HTTP 是否保存调用日志（`on` / `off`） |
 | `X_SEARCH_LOG_DIR` | `~/.config/x-search-mcp/logs` | 调用日志目录 |
 | `X_SEARCH_LOG_KEEP` | `100` | 保留最近多少份日志；`0` 表示不清理 |
 | `X_SEARCH_LOG_MAX_BYTES` | `8388608` | 单次原始响应写入上限；超出后截断并标记 |
@@ -150,7 +151,7 @@ HTTP 请求体默认上限为 1 MiB。`SIGINT`/`SIGTERM` 停止服务并取消�
 
 ## 调用日志
 
-每次 `x_search` 都会在本地写一份 JSON 日志，里面是发给 xAI 的请求体和上游原始响应。MCP 结果只返回 `log_file` 路径，不把原始响应塞回工具输出。
+stdio 和单账号 HTTP 默认在本地记录发给 xAI 的请求体和上游原始响应，并在工具结果中提供 `log_file` 路径。多人 HTTP 关闭调用日志。
 
 - 默认目录：`~/.config/x-search-mcp/logs/`
 - 文件权限：`0600`，目录权限：`0700`
@@ -163,7 +164,7 @@ HTTP 请求体默认上限为 1 MiB。`SIGINT`/`SIGTERM` 停止服务并取消�
 
 ## Agent 接入配置
 
-### 原生 HTTP
+### 单账号 HTTP
 
 源码构建后执行：
 
@@ -173,7 +174,7 @@ export X_SEARCH_HTTP_TOKEN="$(openssl rand -hex 32)"
 node bin/x-search-mcp.js http --port 8000
 ```
 
-安装版 0.2.0 可直接使用 `x-search-mcp http`。客户端选择 **Streamable HTTP**，填写 `http://127.0.0.1:8000/mcp`，请求头设为 `Authorization: Bearer <X_SEARCH_HTTP_TOKEN 的值>`。未带正确密钥返回 401；不允许的 Host/Origin 返回 403。
+安装后可直接使用 `x-search-mcp http`。客户端选择 **Streamable HTTP**，填写 `http://127.0.0.1:8000/mcp`，请求头设为 `Authorization: Bearer <X_SEARCH_HTTP_TOKEN 的值>`。未带正确密钥返回 401。来源 Host 或 Origin 未获允许时返回 403。
 
 服务使用同一份本机 Grok 凭证和调用日志；MCP 无状态表示不保存连接会话，不会清除 OAuth 登录。新旧协议都由同一个工具工厂处理，不需要网关子进程。
 
@@ -188,7 +189,7 @@ node bin/x-search-mcp.js http --port 8000
   "mcpServers": {
     "x-search": {
       "command": "npx",
-      "args": ["--yes", "@scoheart/x-search-mcp@0.2.0"],
+      "args": ["--yes", "@scoheart/x-search-mcp@0.3.0"],
       "env": {
         "X_SEARCH_AUTH_MODE": "auto",
         "X_SEARCH_MODEL": "grok-4.5"
@@ -206,7 +207,7 @@ node bin/x-search-mcp.js http --port 8000
 ```toml
 [mcp_servers.x-search]
 command = "npx"
-args = ["--yes", "@scoheart/x-search-mcp@0.2.0"]
+args = ["--yes", "@scoheart/x-search-mcp@0.3.0"]
 tool_timeout_sec = 600
 
 [mcp_servers.x-search.env]

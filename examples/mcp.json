@@ -4,7 +4,7 @@
       "command": "npx",
       "args": [
         "--yes",
-        "@scoheart/x-search-mcp@0.2.0"
+        "@scoheart/x-search-mcp@0.3.0"
       ],
       "env": {
         "X_SEARCH_AUTH_MODE": "auto",

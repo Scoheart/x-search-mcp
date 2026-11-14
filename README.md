@@ -1,117 +1,99 @@
-# @scoheart/x-search-mcp
+# x-search-mcp
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![npm version](https://img.shields.io/npm/v/@scoheart/x-search-mcp)](https://www.npmjs.com/package/@scoheart/x-search-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-Independent Model Context Protocol (MCP) server providing real-time `x_search` capabilities using xAI's responses API, inspired by Nous Research's Hermes Agent.
+A read-only MCP server for searching X through the xAI Responses API. Its `x_search` tool supports account and date filters and returns source links when xAI provides them.
 
-## Quick Start
+[中文使用手册](./TOOL.md)
 
-### Installation
+| If you want to… | Use | xAI credentials |
+| --- | --- | --- |
+| Search from Codex, Pi, or another local MCP client | [Local stdio](#connect-a-local-mcp-client) | Your API key or eligible Grok subscription |
+| Use one account from several devices | [Single-account HTTP](#single-account-http) | One API key or eligible Grok subscription on the server |
+| Let invited users share a URL and use their own xAI accounts | [Multi-user HTTP](#multi-user-http) | Each user binds an API key and uses their own xAI API quota |
+
+## Quick start
 
 Requires Node.js **22.19.0 or later**.
 
-Run the package directly with `npx`.
-
-```bash
-npx --yes @scoheart/x-search-mcp@0.2.0 auth login
-npx --yes @scoheart/x-search-mcp@0.2.0 auth status
+```sh
+npm install --global @scoheart/x-search-mcp
 ```
 
-You can also install a locally built npm tarball.
+Save your xAI API key in a private file and set `XAI_API_KEY_FILE`, or supply it through `XAI_API_KEY`. Then run a search from the terminal.
 
-```bash
-npm install --global ./scoheart-x-search-mcp-0.2.0.tgz
+```sh
+export XAI_API_KEY_FILE=/absolute/path/to/xai-api-key
+x-search-mcp search "What did @SpaceX post about Starship this week?"
+```
+
+For a personal Grok subscription, sign in with the device code and explicitly select OAuth for the test. X Search access depends on your account's subscription entitlements.
+
+```sh
+x-search-mcp auth login
 x-search-mcp auth status
+x-search-mcp search "What did @SpaceX post about Starship this week?" --auth oauth
 ```
 
-To build from source:
+`X_SEARCH_AUTH_MODE=oauth` selects subscription credentials for local stdio or single-account HTTP. The default `auto` mode uses a configured API key first, then looks for a local OAuth login. See the [authentication and configuration reference](./TOOL.md#凭证配置).
 
-```bash
+## Connect a local MCP client
+
+Run the command for your client after installing the package. The client launches `x-search-mcp` over stdio.
+
+```sh
+codex mcp add x-search -- x-search-mcp --stdio
+# Or with Pi
+pi mcp add x-search -- x-search-mcp --stdio
+```
+
+In your client, ask it to use `x_search` and include links to the source posts. If the client launches in a separate environment, put `XAI_API_KEY_FILE` or `X_SEARCH_AUTH_MODE=oauth` in the server's environment configuration. Use the absolute executable path if your client cannot find `x-search-mcp`.
+
+See the [Codex TOML](./examples/codex.toml) and [generic MCP JSON](./examples/mcp.json) examples for running the package with `npx` from the client.
+
+## Run over HTTP
+
+Both modes use the official MCP SDK with Streamable HTTP.
+
+### Single-account HTTP
+
+Configure xAI credentials on the host that runs the service. Save a long, randomly generated MCP bearer token in a separate private file and start the server.
+
+```sh
+x-search-mcp http --token-file /absolute/path/to/mcp-token
+```
+
+Connect to `http://127.0.0.1:8000/mcp` with `Authorization: Bearer <MCP token>`. All callers use the host's configured xAI account. For remote access, keep the server on loopback, terminate HTTPS at a reverse proxy, and pass its hostname with `--allowed-host mcp.example.com`. See `x-search-mcp http --help` and the [HTTP configuration reference](./TOOL.md#http-服务配置).
+
+### Multi-user HTTP
+
+Deploy behind HTTPS with an MCP OAuth issuer and Alibaba Cloud KMS. Each invited user signs in to the same `/mcp` URL, opens `/settings` with the same identity, and binds their xAI API key. The server stores each binding encrypted and uses it for that user's searches. The settings page supports replacing and removing keys.
+
+```sh
+x-search-mcp http --multi-user --port 8000
+```
+
+See the [multi-user deployment guide](./docs/multi-user.md) for issuer setup, KMS permissions, reverse-proxy configuration, and Codex and Pi login commands. Grok subscription login is available in the personal modes.
+
+## Results and logs
+
+- `x_search` accepts a query, optional X account filters, and a date range. See the [tool parameters](./TOOL.md#工具参数规范-x_search).
+- Results include the answer, citations, and available usage information. A result marked `degraded: true` lacks source links.
+- By default, stdio and single-account HTTP save local call logs under `~/.config/x-search-mcp/logs/`. Multi-user HTTP disables those logs.
+
+## Development
+
+```sh
 git clone https://github.com/Scoheart/x-search-mcp.git
 cd x-search-mcp
 npm ci
-npm run build
-# Build a distributable .tgz; prepack compiles the current source automatically.
+npm test
 npm pack
 ```
 
-### Authentication
-
-Choose between direct API Key or Subscription OAuth:
-
-```bash
-# 1. Using API Key
-export XAI_API_KEY="xai-your-api-key"
-
-# 2. Or using Grok Subscription via Device Code OAuth (source checkout)
-node bin/x-search-mcp.js auth login
-```
-
-### Run Server
-
-```bash
-# stdio MCP server for agent clients (Claude Desktop, Cursor, Cline, etc.)
-node bin/x-search-mcp.js
-```
-
-For an npm-installed package, use `x-search-mcp` in place of `node bin/x-search-mcp.js`.
-
-### Native Streamable HTTP (0.2.0)
-
-The server uses the official MCP SDK directly; it can serve both the 2026 protocol and stateless 2025-era Streamable HTTP clients. Default stdio startup remains available.
-
-Run from a built source checkout:
-
-```bash
-export X_SEARCH_AUTH_MODE=oauth
-export X_SEARCH_HTTP_TOKEN="$(openssl rand -hex 32)"
-node bin/x-search-mcp.js http --port 8000
-```
-
-For an installed 0.2.0 package, use `x-search-mcp http` (or `x-search-mcp --http`). The default endpoint is `http://127.0.0.1:8000/mcp`. Each client supplies `Authorization: Bearer <the value of X_SEARCH_HTTP_TOKEN>`.
-
-For a persistent credential, use `--token-file /path/to/private/http-token` or `X_SEARCH_HTTP_TOKEN_FILE` instead of an inline token. The file contains only the bearer token and should be private (`0600`). It is read at startup. An explicit `--token-file` overrides environment credentials; otherwise `X_SEARCH_HTTP_TOKEN` takes precedence over `X_SEARCH_HTTP_TOKEN_FILE`.
-
-HTTP access uses its own credential. Grok subscription OAuth is completed on the server machine using `auth login`; its credential file and search logs remain there. All authorized callers use that service's configured Grok account. HTTP access currently supports clients with configured bearer headers, rather than an OAuth sign-in/discovery service.
-
-For an HTTPS reverse proxy, keep the listener on loopback and explicitly allow the proxy's public Host hostname:
-
-```bash
-x-search-mcp http --token-file /path/to/private/http-token \
-  --allowed-host mcp.example.com
-```
-
-Point the client at `https://mcp.example.com/mcp`. Configure proxy timeouts for long searches (the default upstream timeout is 180 seconds). If a browser client calls the service directly, add its exact origin, for example `--allowed-origin https://app.example.com`; preflight is enabled only for explicitly allowed origins. Host allowlist entries have no scheme or port. Origin allowlist entries include scheme and port and have no path.
-
-`--host`, `--port`, `--path`, `--allowed-host` and `--allowed-origin` configure deployment; the two allowlist flags are repeatable. `SIGINT`/`SIGTERM` stop the listener and cancel active work, including OAuth lock waiters. An already submitted OAuth refresh is allowed to finish its atomic credential save before shutdown completes: aborting that exchange could lose an upstream-rotated refresh token. This phase has its own 30-second deadline. See `x-search-mcp http --help` and [TOOL.md](./TOOL.md) for environment defaults.
-
-### MCP Client Configuration
-
-Add this server to Pi's `~/.pi/agent/mcp.json` or another client that accepts `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "x-search": {
-      "command": "npx",
-      "args": ["--yes", "@scoheart/x-search-mcp@0.2.0"],
-      "env": {
-        "X_SEARCH_AUTH_MODE": "oauth",
-        "X_SEARCH_MODEL": "grok-4.5"
-      },
-      "timeout": 600
-    }
-  }
-}
-```
-
-For a globally installed tarball, use `"command": "x-search-mcp"` and `"args": []`. The client must have Node/npm on its `PATH`; otherwise use the executable's absolute path. Restart or reload the client after changing its configuration. Pi sessions started with `--no-mcp` do not connect to MCP servers.
-
-OAuth credentials and call logs stay in `~/.config/x-search-mcp/`; they are not included in the npm package. OAuth login does not guarantee X Search entitlement, and responses without source URLs are marked `degraded: true`.
-
-See [TOOL.md](./TOOL.md) for full Chinese documentation, parameters, and configuration options.
+`npm test` compiles the TypeScript and runs the tests. `npm pack` builds an installable tarball.
 
 ## License
 
-[MIT](./LICENSE) © Scoheart  
-See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for third-party notices (Hermes Agent).
+[MIT](./LICENSE) © Scoheart. The implementation was inspired by Nous Research's Hermes Agent. See [third-party notices](./THIRD_PARTY_NOTICES.md).

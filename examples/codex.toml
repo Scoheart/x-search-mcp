@@ -1,6 +1,6 @@
 [mcp_servers.x-search]
 command = "npx"
-args = ["--yes", "@scoheart/x-search-mcp@0.2.0"]
+args = ["--yes", "@scoheart/x-search-mcp@0.3.0"]
 tool_timeout_sec = 600
 
 [mcp_servers.x-search.env]
